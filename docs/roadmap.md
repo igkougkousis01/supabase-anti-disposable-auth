@@ -12,12 +12,17 @@ Delivery order. Each item is one branch. Nothing below is implemented unless mar
 - Error hierarchy, exit codes and a minimal logger
 - `doctor`: Node.js version, configuration, connectivity and server-version checks
 
-## v0.2 — Database schema
+## v0.2 — Database guard layer — **Done**
 
-- `guard` schema with blocklist, allowlist and metadata tables
-- Versioned, idempotent SQL applied by `install`
-- Dry-run flag that prints the SQL without executing it
-- `status` reporting installed version and table state
+- `guard` schema with blocklist, allowlist, metadata and migration-history tables
+- Versioned SQL migrations with checksum verification, applied by `install`
+- `guard.normalize_domain()` and `guard.is_disposable_domain()` with allowlist precedence
+- Conservative privileges: nothing granted to `PUBLIC`, `anon` or `authenticated`
+- `status` reporting schema version, row counts and what is still not configured
+- Unit tests for the runner, plus live-database tests behind `SADA_TEST_DB_URL`
+
+Deliberately deferred from this branch: a dry-run flag that prints SQL without
+executing it, and `uninstall` support for the new objects.
 
 ## v0.3 — Blocklist synchronisation
 
@@ -26,36 +31,30 @@ Delivery order. Each item is one branch. Nothing below is implemented unless mar
 - Reconciliation (add, remove, keep) rather than truncate-and-reload
 - Refresh metadata recorded in the database
 
-## v0.4 — Disposable-domain lookup function
-
-- SQL function that answers whether an address belongs to a disposable domain
-- Allowlist checked before the blocklist
-- Indexed lookups with a measured cost per signup
-
-## v0.5 — Supabase Before User Created hook
+## v0.4 — Supabase Before User Created hook
 
 - Hook function in the `guard` schema
 - Registration and unregistration through `install` / `uninstall`
 - Clear rejection message returned to the client
 
-## v0.6 — Strict trigger mode (opt-in)
+## v0.5 — Strict trigger mode (opt-in)
 
 - Optional trigger-level enforcement for defence in depth
 - Off by default; enabled explicitly with a flag
 - Documented trade-offs and rollback path
 
-## v0.7 — `pg_cron` synchronisation (opt-in)
+## v0.6 — `pg_cron` synchronisation (opt-in)
 
 - Detect whether `pg_cron` is available in the project
 - Schedule blocklist refresh inside the database
 - Remove the schedule cleanly on uninstall
 
-## v0.8 — Allowlist management
+## v0.7 — Allowlist management
 
 - Commands to add, remove and list allowlisted domains
 - Allowlist preserved across upgrades and blocklist refreshes
 
-## v0.9 — Uninstall and rollback safety
+## v0.8 — Uninstall and rollback safety
 
 - Complete removal of everything the tool installed
 - Preview of exactly what will be dropped before it happens

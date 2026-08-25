@@ -15,6 +15,20 @@ export {
   type DoctorReport,
 } from './commands/doctor.js';
 export {
+  printInstallSummary,
+  runInstall,
+  type InstallDependencies,
+  type InstallEvents,
+  type InstallReport,
+} from './commands/install.js';
+export {
+  printStatusReport,
+  runStatus,
+  statusExitCode,
+  type StatusDependencies,
+  type StatusReport,
+} from './commands/status.js';
+export {
   isSupportedNodeVersion,
   loadConfig,
   loadEnvFileIfPresent,
@@ -24,6 +38,29 @@ export {
 } from './config/env.js';
 export type { AppConfig, NodeVersionRequirement } from './config/types.js';
 export { createPostgresConnection, PostgresClient, readServerVersion } from './database/client.js';
+export {
+  calculateChecksum,
+  ensureMigrationInfrastructure,
+  loadMigrationFiles,
+  parseMigrationFileName,
+  planMigrations,
+  readAppliedMigrations,
+  resolveMigrationsDirectory,
+  runMigrations,
+  GUARD_SCHEMA,
+  MIGRATIONS_DIRECTORY_NAME,
+  MIGRATIONS_TABLE,
+  type RunMigrationsOptions,
+} from './database/migrations.js';
+export type {
+  AppliedMigration,
+  MigrationFile,
+  MigrationPlan,
+  MigrationPlanEntry,
+  MigrationRunResult,
+  MigrationState,
+} from './database/migration-types.js';
+export { readGuardSchemaStatus, type GuardSchemaStatus } from './database/schema-status.js';
 export type {
   DatabaseConnection,
   DatabaseConnectionConfig,
@@ -39,6 +76,7 @@ export {
   EXIT_CODES,
   formatErrorForUser,
   isAppError,
+  MigrationError,
   toAppError,
   UnexpectedError,
   type ErrorKind,

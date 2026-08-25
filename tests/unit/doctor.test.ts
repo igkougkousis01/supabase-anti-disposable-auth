@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { printDoctorReport, runDoctor } from '../../src/commands/doctor.js';
 import type { DatabaseConnection, QueryResult } from '../../src/database/types.js';
 import { ConfigurationError, DatabaseConnectionError, EXIT_CODES } from '../../src/lib/errors.js';
-import type { Logger } from '../../src/lib/logger.js';
+import { createRecordingLogger } from '../helpers/logger.js';
 
 const PASSWORD = 'hunter2';
 const DB_URL = `postgresql://postgres:${PASSWORD}@db.example.supabase.co:5432/postgres?sslmode=require`;
@@ -29,26 +29,11 @@ function createFakeConnection(options: FakeConnectionOptions = {}) {
   const connection: DatabaseConnection = {
     target: 'db.example.supabase.co:5432/postgres',
     query: query as DatabaseConnection['query'],
+    execute: vi.fn(async () => undefined),
     close,
   };
 
   return { connection, close, query };
-}
-
-function createRecordingLogger() {
-  const lines: string[] = [];
-  const record = (message: string) => lines.push(message);
-
-  const logger: Logger = {
-    plain: record,
-    blank: () => lines.push(''),
-    info: record,
-    success: record,
-    warning: record,
-    error: record,
-  };
-
-  return { logger, lines };
 }
 
 describe('runDoctor', () => {
@@ -158,6 +143,7 @@ describe('runDoctor', () => {
           'Query failed against db.example.supabase.co:5432/postgres',
         );
       }),
+      execute: vi.fn(async () => undefined),
       close,
     };
 

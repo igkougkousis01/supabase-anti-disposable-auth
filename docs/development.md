@@ -65,13 +65,48 @@ tested with a fake connection.
 ### Integration tests
 
 `tests/integration` contains tests that need a real database. They skip themselves
-unless `SUPABASE_DB_URL` is set, which keeps `npm test` and CI offline by default.
+unless the relevant variable is set, which keeps `npm test` and CI offline by default.
+CI never requires Supabase credentials.
+
+There are two, and the distinction matters:
+
+| Variable           | Used by                | Effect on the database                          |
+| ------------------ | ---------------------- | ----------------------------------------------- |
+| `SUPABASE_DB_URL`  | `database.test.ts`     | Read-only: connects and reads `server_version`. |
+| `SADA_TEST_DB_URL` | `guard-schema.test.ts` | **Destructive**: drops and recreates `guard`.   |
+
+> **⚠️ `guard-schema.test.ts` runs `drop schema if exists guard cascade`.**
+> It creates the schema from scratch, exercises it, and drops it again. Nothing outside
+> `guard` is read or written — `public` and `auth` are never touched — but any data you
+> had in `guard` is destroyed.
+
+That is exactly why it does **not** reuse `SUPABASE_DB_URL`: a developer's
+`SUPABASE_DB_URL` usually points at a real Supabase project, and `npm run
+test:integration` must never drop a schema there by accident. Use a dedicated local
+database:
 
 ```bash
-SUPABASE_DB_URL="postgresql://..." npm run test:integration
+createdb supabase_anti_disposable_auth_test
 ```
 
-Point these at a scratch project, not production.
+```bash
+SADA_TEST_DB_URL="postgresql://localhost:5432/supabase_anti_disposable_auth_test" npm run test:integration
+```
+
+Never point `SADA_TEST_DB_URL` at production, and never at a Supabase project you care
+about.
+
+Fixture data is small, deterministic and inserted inside transactions that are rolled
+back, so the tests leave no rows behind:
+
+```text
+mailinator.com
+10minutemail.com
+trashmail.example
+```
+
+No blocklist ships with the package, and no fixture is ever inserted into a real user
+database.
 
 ## Build
 
@@ -116,6 +151,56 @@ npm run format        # rewrite files
 npm run format:check  # verify only (this is what CI runs)
 ```
 
+## Working on migrations
+
+SQL migrations live in `migrations/` and are the source of truth for everything created
+in the database. The full rules are in [migrations/README.md](../migrations/README.md);
+the two that bite hardest:
+
+- **Never edit a migration that has shipped.** Checksums are recorded at apply time and
+  re-verified on every run, so an edit fails the run rather than being re-applied. Add a
+  new numbered file instead.
+- **Never write `begin` / `commit` in a migration.** The runner owns transactions and
+  wraps each file together with its history row.
+- **A migration that creates a function must re-revoke `PUBLIC` execute.** PostgreSQL
+  grants `EXECUTE` to `PUBLIC` on every new function, and `ALTER DEFAULT PRIVILEGES`
+  cannot prevent that at schema scope, so end such a migration with
+  `revoke all privileges on all functions in schema guard from public;`. An integration
+  test fails the build if you forget.
+
+### Bootstrap infrastructure
+
+The numbered migrations start at `001_create_domain_functions.sql`. There is no
+`001_create_guard_schema.sql`, and that is deliberate.
+
+`guard` and `guard.schema_migrations` are created by the migration runner before any
+numbered migration executes, because a migration counts as applied only once its row is
+written to `guard.schema_migrations` — so that table has to exist first. A migration
+that created the history table could not record itself, and the runner would have to
+special-case it. Keeping the bootstrap out of the numbered set means every numbered
+migration is applied by exactly the same code path, transaction and checksum check.
+
+Both bootstrap statements are `if not exists`, so they are a no-op on an existing
+install, and `guard.schema_migrations` holds no row for its own creation.
+
+Apply them from source against a scratch database:
+
+```bash
+SUPABASE_DB_URL="postgresql://localhost:5432/scratch" npm run dev -- install
+```
+
+```bash
+SUPABASE_DB_URL="postgresql://localhost:5432/scratch" npm run dev -- status
+```
+
+`install` is idempotent — running it again applies nothing and reports the layer as
+already up to date.
+
+`status` is a health check as well as a report: it exits `0` only when the guard layer
+is complete, and `5` when it is absent, incomplete or damaged. Configuration (`2`) and
+database (`3`) failures keep their own codes, so a broken connection is never reported
+as a health verdict.
+
 ## Conventions
 
 - `process.env` is read **only** in `src/config/env.ts`. Everything else receives a
@@ -125,5 +210,9 @@ npm run format:check  # verify only (this is what CI runs)
   and may print diagnostics.
 - Never log, persist, or pass a connection string as a process argument. Use
   `describeConnectionTarget()` when you need to name a database in output.
-- All values sent to PostgreSQL are bound query parameters.
-- No ORM. Plain SQL through `pg`.
+- All values sent to PostgreSQL are bound query parameters. The one exception is
+  `DatabaseConnection.execute()`, which sends a multi-statement script verbatim and is
+  reserved for migration files that ship with this package — never for user input.
+- No ORM and no migration framework. Plain SQL through `pg`.
+- Application objects live only in the `guard` schema. Never `public`, never `auth`, and
+  `auth.users` is never modified.
