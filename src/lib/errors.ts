@@ -18,6 +18,14 @@ export const EXIT_CODES = {
   configuration: 2,
   database: 3,
   notImplemented: 4,
+  /**
+   * The database was reachable and answered, but the guard layer is absent or damaged.
+   *
+   * Kept distinct from `database` on purpose: a health verdict is not a failure to talk
+   * to PostgreSQL, and a CI check needs to tell "I could not reach the database" apart
+   * from "I reached it and the guard layer is not installed". Only `status` uses it.
+   */
+  guardHealth: 5,
 } as const;
 
 export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
@@ -57,6 +65,18 @@ export class DatabaseConnectionError extends AppError {
 
 /** A statement failed against an otherwise healthy connection. */
 export class DatabaseQueryError extends AppError {
+  readonly kind = 'database' as const;
+  readonly exitCode = EXIT_CODES.database;
+}
+
+/**
+ * A migration could not be applied, or the migration set itself is inconsistent.
+ *
+ * Separate from {@link DatabaseQueryError} because the cause is usually the state of
+ * the migration files rather than the statement that happened to fail: a renamed
+ * file, an edited file that was already applied, or a partially applied run.
+ */
+export class MigrationError extends AppError {
   readonly kind = 'database' as const;
   readonly exitCode = EXIT_CODES.database;
 }

@@ -33,8 +33,8 @@ export function buildProgram(logger: Logger = defaultLogger): Command {
     .showHelpAfterError('(run with --help to see available commands)');
 
   registerDoctorCommand(program, logger);
-  registerInstallCommand(program);
-  registerStatusCommand(program);
+  registerInstallCommand(program, logger);
+  registerStatusCommand(program, logger);
   registerSyncCommand(program);
   registerUninstallCommand(program);
 

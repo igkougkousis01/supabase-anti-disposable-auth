@@ -23,6 +23,21 @@ export function getPackageVersion(): string {
   return cachedVersion;
 }
 
+/**
+ * Absolute path of the installed package root, i.e. the directory holding package.json.
+ *
+ * Used to locate files that ship alongside the code but are not bundled into `dist/`,
+ * such as `migrations/`. Walking up from this module works both when running from
+ * source (`src/lib/`) and from the bundle (`dist/`).
+ *
+ * Returns `undefined` if no package.json is found, which callers must report rather
+ * than paper over.
+ */
+export function getPackageRoot(): string | undefined {
+  const packageJsonPath = findPackageJson(dirname(fileURLToPath(import.meta.url)));
+  return packageJsonPath === undefined ? undefined : dirname(packageJsonPath);
+}
+
 function readVersion(): string {
   const packageJsonPath = findPackageJson(dirname(fileURLToPath(import.meta.url)));
   if (packageJsonPath === undefined) {

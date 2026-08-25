@@ -21,6 +21,20 @@ export interface DatabaseConnection {
     sql: string,
     parameters?: SqlParameter[],
   ): Promise<QueryResult<Row>>;
+  /**
+   * Runs a SQL script that may contain several statements.
+   *
+   * Uses the simple query protocol, which is the only way to send a multi-statement
+   * batch: `pg` switches to the extended protocol as soon as a parameter array is
+   * present, and that protocol permits exactly one statement per message. Splitting a
+   * file on `;` instead is not an option -- function bodies contain semicolons.
+   *
+   * SECURITY: `sql` is sent verbatim and nothing in it can be bound as a parameter, so
+   * it must only ever be trusted SQL shipped with this package. Never pass user input
+   * and never build the string by interpolation -- use {@link DatabaseConnection.query}
+   * with bound parameters for anything value-shaped.
+   */
+  execute(sql: string): Promise<void>;
   close(): Promise<void>;
 }
 

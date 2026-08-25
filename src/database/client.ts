@@ -107,6 +107,32 @@ export class PostgresClient implements DatabaseConnection {
   }
 
   /**
+   * Runs a multi-statement SQL script through the simple query protocol.
+   *
+   * See {@link DatabaseConnection.execute} for the security contract: the script is
+   * never parameterised, so only trusted SQL that ships with this package may be
+   * passed here.
+   *
+   * @throws DatabaseQueryError with the original error attached as `cause`.
+   */
+  async execute(sql: string): Promise<void> {
+    const client = this.client;
+    if (client === undefined) {
+      throw new DatabaseConnectionError(`Not connected to ${this.target}`, {
+        hint: 'Call connect() before running a script.',
+      });
+    }
+
+    try {
+      // No values array: passing one would select the extended protocol, which
+      // rejects multi-statement batches.
+      await client.query(sql);
+    } catch (cause) {
+      throw new DatabaseQueryError(`Script failed against ${this.target}`, { cause });
+    }
+  }
+
+  /**
    * Closes the connection. Safe to call more than once.
    *
    * @throws DatabaseConnectionError if the server rejects the shutdown; the client is
