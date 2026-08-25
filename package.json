@@ -1,0 +1,78 @@
+{
+  "name": "supabase-anti-disposable-auth",
+  "version": "0.1.0",
+  "description": "CLI that installs database-level disposable-email protection into Supabase projects.",
+  "license": "MIT",
+  "author": "igkougkousis01",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "bin": {
+    "supabase-anti-disposable-auth": "dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "supabase",
+    "postgres",
+    "disposable-email",
+    "auth",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/igkougkousis01/supabase-anti-disposable-auth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/igkougkousis01/supabase-anti-disposable-auth/issues"
+  },
+  "homepage": "https://github.com/igkougkousis01/supabase-anti-disposable-auth#readme",
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsup",
+    "test": "vitest run --dir tests/unit",
+    "test:watch": "vitest watch --dir tests/unit",
+    "test:integration": "vitest run --dir tests/integration",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^15.0.0",
+    "pg": "^8.23.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^20.19.9",
+    "@types/pg": "^8.23.1",
+    "eslint": "^10.9.1",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.6",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.68.0",
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "esbuild": "^0.28.2"
+  }
+}
