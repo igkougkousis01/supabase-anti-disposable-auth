@@ -7,26 +7,31 @@ your app, another client, or the dashboard — is covered by the same rule.
 
 ## Project status: early development
 
-The **database policy engine works**. The `guard` schema, its blocklist, allowlist and
-lookup functions are installed by `install` and can be verified with `status`.
+The **database policy engine works**, and `sync` keeps its blocklist current from an
+upstream source. The `guard` schema, its blocklist, allowlist and lookup functions are
+installed by `install`, refreshed by `sync`, and can be verified with `status`.
 
 > **⚠️ Signups are not filtered yet.** The Supabase **Before User Created** auth hook is
 > not implemented, so nothing calls the lookup function during authentication.
-> Installing this tool today creates a correct policy engine that no signup path
-> consults. Do not rely on it for protection yet.
+> Installing this tool today creates a correct, populated policy engine that no signup
+> path consults. Do not rely on it for protection yet.
+>
+> **⚠️ Sync is manual.** `pg_cron` scheduling is not implemented. The blocklist refreshes
+> when you run `sync`, and never otherwise.
 
 ```text
-CLI
- │
- ▼
-PostgreSQL
- │
- ▼
-guard schema
- ├── blocked_domains
- ├── allowed_domains
- ├── sync_metadata
- └── is_disposable_domain()
+Remote provider                       CLI
+      ↓                                │
+Fetch (HTTPS, timeout, size cap)       │
+      ↓                                ▼
+Validate / normalise             PostgreSQL
+      ↓                                │
+Safety checks                          ▼
+      ↓                          guard schema
+Atomic DB replacement  ────────►  ├── blocked_domains
+                                  ├── allowed_domains
+                                  ├── sync_metadata
+                                  └── is_disposable_domain()
 ```
 
 Planned — how it gets wired into signups in a later branch:
@@ -45,7 +50,7 @@ Planned, not yet built (see [docs/roadmap.md](docs/roadmap.md)):
 
 - Supabase **Before User Created** auth hook backed by a database function
 - Optional strict PostgreSQL trigger enforcement
-- Automatic blocklist refresh from an upstream list, optionally scheduled with `pg_cron`
+- **Scheduled** blocklist refresh with `pg_cron` (manual refresh works today)
 - Safe uninstall flow with dry-run support
 
 ## Requirements
@@ -70,7 +75,7 @@ To run it from a clone, see [docs/development.md](docs/development.md).
 | `doctor`    | **Available**       | Validate the local environment and database connectivity.    |
 | `install`   | **Available**       | Create the guard schema and policy engine. No auth hook yet. |
 | `status`    | **Available**       | Report the state of the guard schema in the target database. |
-| `sync`      | Not implemented yet | Refresh the disposable-domain blocklist.                     |
+| `sync`      | **Available**       | Refresh the disposable-domain blocklist. Manual only.        |
 | `uninstall` | Not implemented yet | Remove everything the CLI installed.                         |
 
 Global flags:
@@ -151,6 +156,155 @@ When everything is already applied:
 ```text
 ✓ Database guard layer already up to date.
 ```
+
+### `sync`
+
+Downloads the upstream disposable-domain list and replaces `guard.blocked_domains` with
+it, atomically. Safe to re-run: an unchanged upstream writes no rows, and **any failure
+leaves the previously installed blocklist exactly as it was**.
+
+```text
+$ supabase-anti-disposable-auth sync
+
+Supabase Anti-Disposable Auth
+
+✓ Connected to PostgreSQL (db.abcdefgh.supabase.co:5432/postgres)
+✓ Provider: disposable-email-domains
+✓ Downloaded blocklist (1.1 MB, HTTP 200, 503 ms)
+✓ Parsed 74,825 lines
+✓ Accepted 74,825 domains
+✓ Candidate passed safety checks
+✓ Blocklist updated atomically (+143 / -60)
+✓ Checksum: 1955f407ea92
+
+Sync complete.
+```
+
+When upstream has not changed, nothing is rewritten:
+
+```text
+✓ Blocklist already up to date
+✓ 74,825 domains
+
+Checksum: 1955f407ea92
+```
+
+> **Sync is manual.** It runs when you run it. `pg_cron` scheduling is **not
+> implemented**, and the Supabase auth hook is **not implemented** — so a fully
+> synchronised blocklist still filters no signups yet.
+
+#### Provider
+
+One provider, the maintained open-source
+[`disposable/disposable-email-domains`](https://github.com/disposable/disposable-email-domains)
+dataset, read from its plain-text raw endpoint:
+
+```text
+https://raw.githubusercontent.com/disposable/disposable-email-domains/master/domains.txt
+```
+
+No GitHub token is required and no HTML is ever parsed. There is deliberately **no way
+to point `sync` at an arbitrary URL** — that would turn this CLI into an SSRF primitive
+running with your database credentials in its environment.
+
+#### What it does to your data
+
+- Replaces **`guard.blocked_domains`** in full, inside one transaction.
+- **Never touches `guard.allowed_domains`.** A domain on both lists stays on both; the
+  allowlist still wins at lookup time.
+- Never drops or recreates a table, so grants, constraints and object identity survive.
+- Manual blocklist rows that upstream does not carry **are removed**. Use the allowlist
+  for durable operator policy.
+
+#### Safety checks
+
+A remote list is not trusted blindly. A candidate is refused unless it has:
+
+| Check                | Threshold                 |
+| -------------------- | ------------------------- |
+| Minimum domain count | 1,000                     |
+| Minimum valid lines  | 80% of non-blank lines    |
+| Maximum shrink       | 30% of the installed list |
+
+```text
+✗ Suspicious blocklist update rejected: the candidate contains 40 domains, below the
+  minimum of 1,000; the candidate would remove 99.6% of the installed list (10,000 to
+  40 domains), more than the 30.0% limit
+Current domains: 10,000. Candidate domains: 40. The installed blocklist was left
+unchanged. Inspect the upstream source before syncing again.
+```
+
+There is **no override flag**, by design.
+
+On a **first sync** there is no installed list to compare against, so the shrink check
+is skipped and only the absolute minimum and the validity ratio apply. The CLI says so:
+
+```text
+✓ Candidate passed safety checks (first sync: no list to compare against)
+```
+
+#### Dry run
+
+```bash
+supabase-anti-disposable-auth sync --dry-run
+```
+
+```text
+Supabase Anti-Disposable Auth
+
+Dry run
+
+✓ Connected to PostgreSQL (db.abcdefgh.supabase.co:5432/postgres)
+✓ Provider: disposable-email-domains
+✓ Downloaded blocklist (1.1 MB, HTTP 200, 421 ms)
+✓ Parsed 74,825 lines
+✓ Accepted 74,825 domains
+✓ Candidate passed safety checks
+
+Current domains:   74,682
+Candidate domains: 74,825
+Added:             143
+Removed:           0
+
+✓ Candidate passes safety checks
+Checksum: 1955f407ea92
+No database changes made.
+```
+
+A dry run writes **nothing** — not a blocklist row, not a metadata row, not a temporary
+table — and takes no advisory lock, so it cannot block a real sync.
+
+#### Sync metadata
+
+`guard.sync_metadata` holds one row per source:
+
+| Outcome | `status`  | `last_attempt_at` | `last_success_at` | `domain_count` / `checksum` |
+| ------- | --------- | ----------------- | ----------------- | --------------------------- |
+| Success | `success` | now               | now               | candidate values            |
+| No-op   | `success` | now               | now               | unchanged                   |
+| Failure | `failed`  | now               | **unchanged**     | **unchanged**               |
+| Dry run | —         | —                 | —                 | —                           |
+
+A failure records what went wrong without disturbing the values that describe the data
+actually installed, so the gap between `last_attempt_at` and `last_success_at` is a
+direct measure of how long sync has been broken.
+
+A no-op advances `last_success_at` deliberately: it answers "when did we last confirm we
+match upstream?", which is what staleness monitoring asks. Whether the data changed is
+what `checksum` is for.
+
+#### Concurrency
+
+A PostgreSQL session advisory lock serialises syncs. A second `sync` against the same
+database fails immediately rather than waiting:
+
+```text
+✗ Another blocklist sync is already in progress
+Wait for it to finish, then run sync again.
+```
+
+The key is distinct from the migration runner's, so `install` and `sync` never block
+each other.
 
 ### `status`
 
@@ -233,7 +387,7 @@ touched.
 | ------------------------------ | ----------------------------------------------- |
 | `guard.blocked_domains`        | Disposable domains, keyed by normalised domain. |
 | `guard.allowed_domains`        | Overrides for false positives.                  |
-| `guard.sync_metadata`          | Per-source sync state. Empty until sync exists. |
+| `guard.sync_metadata`          | Per-source sync state, written by `sync`.       |
 | `guard.schema_migrations`      | Applied migrations and their checksums.         |
 | `guard.normalize_domain()`     | Domain extraction and canonicalisation.         |
 | `guard.is_disposable_domain()` | The policy answer, with allowlist precedence.   |
@@ -312,11 +466,17 @@ migrations.
 | `3`  | Database connection or query error                       |
 | `4`  | Command is not implemented yet                           |
 | `5`  | Guard layer is absent or damaged (`status` health check) |
+| `6`  | Blocklist sync failed (provider, payload or safety)      |
 
 Code `5` is deliberately distinct from `3`. A CI job needs to tell "I could not reach
 the database" apart from "I reached it, and the guard layer is not installed" — so a
 health verdict never borrows the database error code, and a database error never
 reports as a health verdict.
+
+Code `6` is distinct for the same reason. The overwhelmingly likely cause of a sync
+failure is outside the database entirely — an unreachable upstream, a truncated
+download, or a candidate that failed its safety checks. An operator seeing `3` should
+look at their connection string; an operator seeing `6` should look at the provider.
 
 ## Environment variables
 
@@ -368,9 +528,15 @@ This is a security tool, so it holds itself to the same standard it enforces:
   `authenticated`, no `SECURITY DEFINER`, and a pinned `search_path` on every function.
 - Applied migrations are checksum-verified, so an altered historical migration is
   detected rather than silently re-applied.
+- Downloaded blocklists are fetched over HTTPS only, with a timeout, a streamed byte
+  ceiling and a content-type check, and are never executed, evaluated, written to disk
+  or passed to a shell.
+- A failed sync never destroys the last known-good blocklist. Stale-but-known-good beats
+  fresh-but-wrong.
 
-A per-concern breakdown is in
-[docs/architecture.md](docs/architecture.md#database-threat-model).
+Per-concern breakdowns are in
+[docs/architecture.md](docs/architecture.md#database-threat-model) and
+[docs/architecture.md](docs/architecture.md#synchronisation-threat-model).
 
 Vulnerability reports: see [SECURITY.md](SECURITY.md).
 

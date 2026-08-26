@@ -47,7 +47,7 @@
     "build": "tsup",
     "test": "vitest run --dir tests/unit",
     "test:watch": "vitest watch --dir tests/unit",
-    "test:integration": "vitest run --dir tests/integration",
+    "test:integration": "vitest run --dir tests/integration --no-file-parallelism",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

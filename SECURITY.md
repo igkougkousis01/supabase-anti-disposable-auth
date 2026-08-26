@@ -2,8 +2,9 @@
 
 ## Project status
 
-This project is in early development. Only the CLI foundation exists; there is no
-released version and no supported production deployment yet.
+This project is in early development. The CLI, the `guard` database schema and manual
+blocklist synchronisation exist; the Supabase auth hook does not, so no signup is
+filtered yet. There is no released version and no supported production deployment.
 
 | Version | Supported                |
 | ------- | ------------------------ |
@@ -37,6 +38,12 @@ they exist) the SQL objects it installs into your project.
 
 Out of scope: vulnerabilities in Supabase, PostgreSQL, or third-party dependencies.
 Report those to their respective maintainers.
+
+The **content** of the upstream disposable-domain dataset is also out of scope — a
+domain wrongly present on or absent from that list is an upstream data issue, not a
+vulnerability here. A way to make this tool install a dataset that should have been
+refused, or to make a failed sync destroy the installed blocklist, very much is in
+scope.
 
 ## Handling secrets
 

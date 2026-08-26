@@ -24,14 +24,29 @@ Delivery order. Each item is one branch. Nothing below is implemented unless mar
 Deliberately deferred from this branch: a dry-run flag that prints SQL without
 executing it, and `uninstall` support for the new objects.
 
-## v0.3 — Blocklist synchronisation
+## v0.3 — Blocklist synchronisation — **Done**
 
 - `sync` downloads an upstream disposable-domain list with native `fetch`
-- Domain normalisation and validation before insertion
-- Reconciliation (add, remove, keep) rather than truncate-and-reload
-- Refresh metadata recorded in the database
+- One provider: `disposable/disposable-email-domains`, via its plain-text raw endpoint
+- HTTPS-only fetch with a request timeout, a streamed byte ceiling, manual redirect
+  handling and a content-type allowlist
+- Domain normalisation and validation before insertion, kept in lockstep with
+  `guard.normalize_domain()` and asserted by an integration test
+- Deterministic SHA-256 checksum over the sorted, deduplicated domain set
+- Suspicious-update protection: minimum count, valid-line ratio, maximum shrink
+- Differential reconciliation (add, remove, keep) inside one transaction, via a
+  transaction-scoped staging table — never truncate-and-reload
+- Session advisory lock so two syncs cannot replace the list concurrently
+- `sync --dry-run`, which mutates nothing
+- Sync metadata recorded in `guard.sync_metadata`, including failure attempts
+
+Deliberately deferred from this branch: retries, scheduled sync, custom blocklist URLs,
+a `--provider` flag (there is one provider), and `status` reporting sync freshness.
 
 ## v0.4 — Supabase Before User Created hook
+
+**Not implemented.** Nothing calls `guard.is_disposable_domain()` during signup yet, so
+a synchronised blocklist still filters nothing.
 
 - Hook function in the `guard` schema
 - Registration and unregistration through `install` / `uninstall`
@@ -44,6 +59,9 @@ executing it, and `uninstall` support for the new objects.
 - Documented trade-offs and rollback path
 
 ## v0.6 — `pg_cron` synchronisation (opt-in)
+
+**Not implemented.** Synchronisation is manual only: it happens when an operator runs
+`sync`, and never otherwise.
 
 - Detect whether `pg_cron` is available in the project
 - Schedule blocklist refresh inside the database

@@ -59,8 +59,14 @@ npm run test:watch  # unit tests in watch mode
 ```
 
 Unit tests live in `tests/unit` and never touch a network or a database. The database
-layer is injected into `doctor` as a dependency, so its success and failure paths are
-tested with a fake connection.
+layer is injected as a dependency, so success and failure paths are tested with a fake
+connection, and `fetch` is injected into the blocklist pipeline so **no unit test ever
+makes a network request**. There are no opt-in "hit the real upstream" tests; the
+providers are exercised entirely against fixtures.
+
+Blocklist fixtures live in `tests/fixtures/blocklists/` and are deterministic local
+files — see the README in that directory. Nothing in the core test suite depends on the
+live upstream dataset.
 
 ### Integration tests
 
@@ -68,19 +74,21 @@ tested with a fake connection.
 unless the relevant variable is set, which keeps `npm test` and CI offline by default.
 CI never requires Supabase credentials.
 
-There are two, and the distinction matters:
+There are three, and the distinction between the variables matters:
 
-| Variable           | Used by                | Effect on the database                          |
-| ------------------ | ---------------------- | ----------------------------------------------- |
-| `SUPABASE_DB_URL`  | `database.test.ts`     | Read-only: connects and reads `server_version`. |
-| `SADA_TEST_DB_URL` | `guard-schema.test.ts` | **Destructive**: drops and recreates `guard`.   |
+| Variable           | Used by                  | Effect on the database                                                            |
+| ------------------ | ------------------------ | --------------------------------------------------------------------------------- |
+| `SUPABASE_DB_URL`  | `database.test.ts`       | Read-only: connects and reads `server_version`.                                   |
+| `SADA_TEST_DB_URL` | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                     |
+| `SADA_TEST_DB_URL` | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly. |
 
-> **⚠️ `guard-schema.test.ts` runs `drop schema if exists guard cascade`.**
-> It creates the schema from scratch, exercises it, and drops it again. Nothing outside
+> **⚠️ `guard-schema.test.ts` and `blocklist-sync.test.ts` run
+> `drop schema if exists guard cascade`.**
+> They create the schema from scratch, exercise it, and drop it again. Nothing outside
 > `guard` is read or written — `public` and `auth` are never touched — but any data you
 > had in `guard` is destroyed.
 
-That is exactly why it does **not** reuse `SUPABASE_DB_URL`: a developer's
+That is exactly why they do **not** reuse `SUPABASE_DB_URL`: a developer's
 `SUPABASE_DB_URL` usually points at a real Supabase project, and `npm run
 test:integration` must never drop a schema there by accident. Use a dedicated local
 database:
@@ -95,6 +103,13 @@ SADA_TEST_DB_URL="postgresql://localhost:5432/supabase_anti_disposable_auth_test
 
 Never point `SADA_TEST_DB_URL` at production, and never at a Supabase project you care
 about.
+
+Integration test files run **serially** (`--no-file-parallelism`), because they share
+one database and one `guard` schema. Running them in parallel would have them drop the
+schema out from under each other and contend on the migration advisory lock.
+
+The sync integration tests use a local fixture provider, never the real upstream, so
+`npm run test:integration` makes no network request either.
 
 Fixture data is small, deterministic and inserted inside transactions that are rolled
 back, so the tests leave no rows behind:
@@ -135,11 +150,12 @@ npm unlink -g supabase-anti-disposable-auth
 
 ## Quality gates
 
-The same four commands run in CI, on Node 20 and 22:
+The same commands run in CI, on Node 20 and 22:
 
 ```bash
 npm run typecheck
 npm run lint
+npm run format:check
 npm test
 npm run build
 ```
@@ -197,9 +213,44 @@ SUPABASE_DB_URL="postgresql://localhost:5432/scratch" npm run dev -- status
 already up to date.
 
 `status` is a health check as well as a report: it exits `0` only when the guard layer
-is complete, and `5` when it is absent, incomplete or damaged. Configuration (`2`) and
-database (`3`) failures keep their own codes, so a broken connection is never reported
-as a health verdict.
+is complete, and `5` when it is absent, incomplete or damaged. Configuration (`2`),
+database (`3`) and sync (`6`) failures keep their own codes, so a broken connection is
+never reported as a health verdict.
+
+## Working on blocklist sync
+
+The pipeline lives in `src/blocklist/`. Two rules matter more than the rest:
+
+- **`normalizeDomain()` is a mirror of `guard.normalize_domain()`, not a second
+  opinion.** If it accepts something PostgreSQL rejects, the `CHECK` constraint on
+  `guard.blocked_domains` aborts the entire sync transaction. Where a judgement call
+  exists, err towards rejecting — dropping one domain is survivable, breaking every sync
+  is not. `blocklist-sync.test.ts` asserts the two agree over a corpus, so a divergence
+  fails the build.
+- **The pipeline must never call `normalizeDomain()` directly — use
+  `normalizeProviderDomain()`.** The PostgreSQL function extracts a domain from an email
+  address on purpose, because it will eventually see authentication input. A provider
+  payload is contractually a list of domain rows, so the same extraction would salvage
+  `evil.example` out of `user@evil.example` and turn a corrupted feed into legitimate-
+  looking blocklist entries. `normalizeProviderDomain()` validates that a row is already
+  domain-shaped **before** normalising it, and that gate is not recoverable from.
+- **A failed sync must never destroy the installed blocklist.** Staging, replacement and
+  metadata share one transaction; failure metadata is written afterwards, outside it. If
+  you change `src/blocklist/repository.ts`, the rollback-safety tests in both
+  `tests/unit/sync.test.ts` and `tests/integration/blocklist-sync.test.ts` are the ones
+  to watch.
+
+Try it against a scratch database with the real provider:
+
+```bash
+SUPABASE_DB_URL="postgresql://localhost:5432/scratch" npm run dev -- sync --dry-run
+```
+
+```bash
+SUPABASE_DB_URL="postgresql://localhost:5432/scratch" npm run dev -- sync
+```
+
+The dry run makes no database changes at all, so it is always safe to run first.
 
 ## Conventions
 
@@ -214,5 +265,12 @@ as a health verdict.
   `DatabaseConnection.execute()`, which sends a multi-statement script verbatim and is
   reserved for migration files that ship with this package — never for user input.
 - No ORM and no migration framework. Plain SQL through `pg`.
+- Transactions go through `inTransaction()` in `src/database/transaction.ts`. There is
+  one implementation of `begin`/`commit`/`rollback` on purpose: two would be two chances
+  to drift, and a subtly different rollback path leaves a half-applied change nothing
+  detects.
+- The network is reached only from `src/blocklist/fetch.ts`. Anything downloaded is
+  data: never executed, never evaluated, never written to disk, never passed to a shell.
+- No `axios` and no HTTP client dependency. Native `fetch` only.
 - Application objects live only in the `guard` schema. Never `public`, never `auth`, and
   `auth.users` is never modified.

@@ -7,6 +7,69 @@
 
 export { buildProgram, run } from './cli.js';
 export {
+  canonicalizeDomains,
+  canonicalRepresentation,
+  checksumDomains,
+  shortChecksum,
+} from './blocklist/checksum.js';
+export {
+  fetchText,
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_REDIRECTS,
+  DEFAULT_TIMEOUT_MS,
+  type FetchTextOptions,
+  type FetchTextResult,
+} from './blocklist/fetch.js';
+export {
+  normalizeDomain,
+  normalizeProviderDomain,
+  MAX_NORMALIZE_INPUT_LENGTH,
+} from './blocklist/normalize.js';
+export { parseDomainList, type ParsedBlocklist } from './blocklist/parse.js';
+export { getProvider, DEFAULT_PROVIDER_NAME, PROVIDERS } from './blocklist/provider.js';
+export {
+  disposableEmailDomainsProvider,
+  DISPOSABLE_EMAIL_DOMAINS_SOURCE,
+} from './blocklist/providers/disposable-email-domains.js';
+export {
+  acquireSyncLock,
+  readInstalledBlocklist,
+  readInstalledDomains,
+  recordSyncFailure,
+  recordSyncNoOp,
+  recordSyncSuccess,
+  releaseSyncLock,
+  replaceBlocklist,
+  type InstalledBlocklist,
+  type ReplaceBlocklistOptions,
+  type ReplaceBlocklistResult,
+  type SyncMetadataRecord,
+} from './blocklist/repository.js';
+export {
+  assertCandidateIsSafe,
+  evaluateCandidateSafety,
+  DEFAULT_SAFETY_THRESHOLDS,
+  type SafetyInput,
+  type SafetyThresholds,
+  type SafetyVerdict,
+} from './blocklist/safety.js';
+export {
+  runSync,
+  type SyncDependencies,
+  type SyncEvents,
+  type SyncOptions,
+  type SyncOutcome,
+  type SyncReport,
+} from './blocklist/sync.js';
+export type { BlocklistProvider, ProviderFetchOptions, RawBlocklist } from './blocklist/types.js';
+export {
+  isDomainShapedEntry,
+  isValidDomain,
+  MAX_DOMAIN_LENGTH,
+  MAX_LABEL_LENGTH,
+} from './blocklist/validate.js';
+export { printSyncReport } from './commands/sync.js';
+export {
   printDoctorReport,
   runDoctor,
   type DoctorCheck,
@@ -61,6 +124,7 @@ export type {
   MigrationState,
 } from './database/migration-types.js';
 export { readGuardSchemaStatus, type GuardSchemaStatus } from './database/schema-status.js';
+export { inTransaction } from './database/transaction.js';
 export type {
   DatabaseConnection,
   DatabaseConnectionConfig,
@@ -70,6 +134,8 @@ export type {
 } from './database/types.js';
 export {
   AppError,
+  BlocklistFetchError,
+  BlocklistValidationError,
   ConfigurationError,
   DatabaseConnectionError,
   DatabaseQueryError,
@@ -77,6 +143,8 @@ export {
   formatErrorForUser,
   isAppError,
   MigrationError,
+  SuspiciousUpdateError,
+  SyncError,
   toAppError,
   UnexpectedError,
   type ErrorKind,

@@ -35,7 +35,7 @@ export function buildProgram(logger: Logger = defaultLogger): Command {
   registerDoctorCommand(program, logger);
   registerInstallCommand(program, logger);
   registerStatusCommand(program, logger);
-  registerSyncCommand(program);
+  registerSyncCommand(program, logger);
   registerUninstallCommand(program);
 
   return program;

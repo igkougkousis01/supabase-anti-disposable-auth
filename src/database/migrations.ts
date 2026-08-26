@@ -34,6 +34,7 @@ import type {
   MigrationPlanEntry,
   MigrationRunResult,
 } from './migration-types.js';
+import { inTransaction } from './transaction.js';
 import type { DatabaseConnection } from './types.js';
 
 /** Schema every object this tool creates lives in. Never `public`, never `auth`. */
@@ -387,27 +388,4 @@ async function releaseMigrationLock(connection: DatabaseConnection): Promise<voi
     // The lock is session-scoped, so closing the connection releases it anyway. A
     // failure here must not mask the error that is already propagating.
   }
-}
-
-async function inTransaction<T>(
-  connection: DatabaseConnection,
-  work: () => Promise<T>,
-): Promise<T> {
-  await connection.execute('begin');
-
-  let result: T;
-  try {
-    result = await work();
-  } catch (error) {
-    try {
-      await connection.execute('rollback');
-    } catch {
-      // Already aborted, or the connection is gone. The original error is the one
-      // that explains what happened.
-    }
-    throw error;
-  }
-
-  await connection.execute('commit');
-  return result;
 }
