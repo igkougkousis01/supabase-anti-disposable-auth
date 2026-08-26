@@ -1,7 +1,14 @@
 /** Types shared by the database layer. Kept free of `pg` specifics on purpose. */
 
-/** Values that may be bound to a parameterised statement. */
-export type SqlParameter = string | number | boolean | Date | null;
+/**
+ * Values that may be bound to a parameterised statement.
+ *
+ * `readonly string[]` is here so a whole batch of domains can travel as one `text[]`
+ * parameter and be expanded server-side with `unnest($1::text[])`. That is what keeps
+ * bulk insertion to a handful of round trips without ever building SQL by
+ * concatenation -- the array is still a bound value, not text spliced into a statement.
+ */
+export type SqlParameter = string | number | boolean | Date | readonly string[] | null;
 
 export interface QueryResult<Row> {
   readonly rows: Row[];

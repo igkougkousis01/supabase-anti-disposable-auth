@@ -1,0 +1,11 @@
+http://example.com
+user@example.com
+example com
+..example.com
+.example.com
+example..com
+example.com/path
+-example.com
+example-.com
+example.123
+mailinator.com

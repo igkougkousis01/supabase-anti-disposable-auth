@@ -26,11 +26,21 @@ export const EXIT_CODES = {
    * from "I reached it and the guard layer is not installed". Only `status` uses it.
    */
   guardHealth: 5,
+  /**
+   * Blocklist synchronisation failed.
+   *
+   * Distinct from `database` because the overwhelmingly likely cause is outside the
+   * database entirely: an unreachable upstream, a truncated download, or a candidate
+   * list that failed its safety checks. An operator seeing `3` should look at their
+   * connection string; an operator seeing `6` should look at the provider. Conflating
+   * them would send every sync failure to the wrong place.
+   */
+  sync: 6,
 } as const;
 
 export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
 
-export type ErrorKind = 'configuration' | 'database' | 'unexpected';
+export type ErrorKind = 'configuration' | 'database' | 'sync' | 'unexpected';
 
 export interface AppErrorOptions {
   /** Original error, kept for diagnostics. Never rendered for expected failures. */
@@ -79,6 +89,47 @@ export class DatabaseQueryError extends AppError {
 export class MigrationError extends AppError {
   readonly kind = 'database' as const;
   readonly exitCode = EXIT_CODES.database;
+}
+
+/**
+ * The upstream blocklist could not be downloaded.
+ *
+ * Covers everything between "we asked" and "we have bytes": DNS, TLS, timeouts, a
+ * non-2xx status, an insecure redirect, an oversized body, or a wrong content type.
+ * The upstream URL is public and safe to name; no credential is ever involved.
+ */
+export class BlocklistFetchError extends AppError {
+  readonly kind = 'sync' as const;
+  readonly exitCode = EXIT_CODES.sync;
+}
+
+/**
+ * The payload arrived but is not a usable domain list.
+ *
+ * Binary-looking content, or a body that parses to nothing useful. Kept apart from
+ * {@link SuspiciousUpdateError}: this one says "that is not a blocklist", the other
+ * says "that is a blocklist, and I do not believe it".
+ */
+export class BlocklistValidationError extends AppError {
+  readonly kind = 'sync' as const;
+  readonly exitCode = EXIT_CODES.sync;
+}
+
+/**
+ * A well-formed candidate list that failed a safety threshold.
+ *
+ * The installed blocklist is left exactly as it was. This is the error that stands
+ * between a compromised or truncated upstream and production data.
+ */
+export class SuspiciousUpdateError extends AppError {
+  readonly kind = 'sync' as const;
+  readonly exitCode = EXIT_CODES.sync;
+}
+
+/** Synchronisation could not run or could not complete for any other reason. */
+export class SyncError extends AppError {
+  readonly kind = 'sync' as const;
+  readonly exitCode = EXIT_CODES.sync;
 }
 
 /** A bug, or an error we did not anticipate. Diagnostics are allowed here. */
