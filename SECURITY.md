@@ -3,12 +3,13 @@
 ## Project status
 
 This project is in early development. The CLI, the `guard` database schema, manual
-blocklist synchronisation and the **Before User Created hook function** exist.
+blocklist synchronisation, the **Before User Created hook function** and **hosted hook
+activation through the Supabase Management API** exist.
 
-**Installing the hook function does not switch protection on.** Supabase Auth must be
-configured to call it, which this version does not automate and cannot observe. Until an
-operator does that, no signup is filtered. There is no released version and no supported
-production deployment.
+**Installing the hook function still does not switch protection on.** Supabase Auth must
+be configured to call it — by `hook enable`, the dashboard, or `config.toml`. Until that
+happens, no signup is filtered. There is no released version and no supported production
+deployment.
 
 | Version | Supported                |
 | ------- | ------------------------ |
@@ -71,6 +72,43 @@ disposable-_email_ policy only where an email exists, and blocking email-less fl
 would silently disable phone and anonymous auth. Likewise, that installing the tool
 without activating the hook filters nothing is documented behaviour, not a flaw.
 
+Security properties of **hook activation** that are in scope:
+
+- **The Management API token never leaves an `Authorization` header.** Any path that puts
+  it in a URL, a log line, an error message, a file, a process argument, or a request to
+  any host other than `api.supabase.com` is a vulnerability. So is any input — flag,
+  environment variable, config file, redirect — that can redirect an authenticated
+  request somewhere else. So is any way to get it into `--debug` output, including
+  through a server-supplied message or an attached diagnostic `cause`.
+- **It never overwrites a hook it did not install.** Any input or remote state that makes
+  `hook enable` or `hook disable` change a Before User Created URI that is not
+  `pg-functions://postgres/guard/before_user_created` is a vulnerability — including when
+  that hook is currently disabled.
+- **It never modifies an Auth setting outside its two fields.** Any path that writes
+  more than `hook_before_user_created_enabled` and `hook_before_user_created_uri` is a
+  vulnerability, because it would rewrite unrelated settings — and other people's secrets
+  — with stale values.
+- **It never prints the Auth configuration.** That document contains SMTP passwords,
+  OAuth client secrets, SMS provider tokens and hook signing secrets. Any way to get any
+  of them onto a terminal, including through a validation or parse error, is a
+  vulnerability. So is any way to get a foreign HTTP hook's path, query string or
+  userinfo printed in a conflict message.
+- **It never claims success it did not verify.** Any path where a command reports the
+  hook enabled or disabled without a fresh read confirming the exact state, or where a
+  failed verification exits zero, is a vulnerability.
+- **It never activates a database hook known to be broken.** Any way to reach a PATCH
+  without either a passing database preflight or an explicit `--skip-db-check` is a
+  vulnerability. The hook fails closed, so this would reject every signup on the project.
+- **`status` never overstates.** Any output that reads as an activation or protection
+  claim without that state having been observed — including inferring activation from the
+  function existing, or downgrading a failed remote check to "not checked" — is a
+  vulnerability.
+
+Out of scope for activation: that a **conflict refuses rather than replacing** an
+existing hook is deliberate, not a denial of service — replacing an authentication policy
+somebody installed is an operator decision. That `--skip-db-check` allows an operator to
+activate an unverified hook is likewise documented behaviour with a warning, not a flaw.
+
 Out of scope: vulnerabilities in Supabase, PostgreSQL, or third-party dependencies.
 Report those to their respective maintainers.
 
@@ -83,14 +121,23 @@ scope.
 ## Handling secrets
 
 If you are reporting an issue, **never include a real connection string, password,
-service-role key, or JWT** in the report. Redact them.
+service-role key, JWT, or Management API access token** in the report. Redact them.
 
 The tool is designed so that this should not happen by accident:
 
 - database credentials are never written to logs or to disk by the CLI,
 - databases are identified in output as `host:port/database` only,
+- the Management API access token is sent only as an `Authorization: Bearer` header to a
+  compiled-in HTTPS origin, and is redacted out of server messages and diagnostic causes
+  so that even `--debug` cannot print it,
 - secrets are never passed as command-line arguments to other processes,
 - all values sent to PostgreSQL are bound as query parameters.
+
+`SUPABASE_ACCESS_TOKEN` deserves particular care on your side too. A personal access
+token carries the privileges of your entire Supabase account across every project it can
+reach. Keep it in `.env` (gitignored) or a secret manager, never on a command line where
+your shell history will retain it, and revoke it at
+<https://supabase.com/dashboard/account/tokens> if you suspect exposure.
 
 If you find a code path that breaks any of these, treat it as a vulnerability and report
 it privately.

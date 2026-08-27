@@ -80,14 +80,46 @@ Deliberately deferred from this branch, and the reason:
   design question — what it may change, what it must refuse to change, and how it
   proves it did no harm — and is not started in this branch.
 
-## v0.4.1 — Hook activation
+## v0.4.1 — Hook activation — **Done**
 
-**Not implemented.** Until an operator activates the hook themselves, no signup is
-filtered.
+- `supabase/management-client.ts`: a narrow, native-`fetch` Management API client with
+  two operations (`getAuthConfig`, `updateAuthConfig`) against a compiled-in base URL —
+  HTTPS only, request timeout, streamed byte ceiling, JSON content-type check, structured
+  status handling, no redirect following, no automatic retries
+- `SUPABASE_PROJECT_REF` and `SUPABASE_ACCESS_TOKEN`, validated in the existing central
+  Zod config and required **per command**, so no database-only workflow breaks
+- `hook enable` / `hook disable` / `hook status`, each with `--dry-run`
+- A pure activation state machine covering every combination of `enabled` and `uri`,
+  with **conflict** — never silent replacement — whenever the slot holds a URI that is
+  not ours, enabled or not
+- A **database preflight** before any remote write: guard layer complete, hook function
+  installed, `supabase_auth_admin` grants held. Refused by default when
+  `SUPABASE_DB_URL` is absent; `--skip-db-check` is the explicit, warned, opt-in escape
+- **Minimal PATCH**: only `hook_before_user_created_enabled` and
+  `hook_before_user_created_uri`, never a round-tripped copy of the GET response
+- **Post-write verification**: a fresh GET after every PATCH, and a distinct exit code
+  when the state read back is not the state requested
+- `status` reports real remote activation when credentials are present, and
+  `not checked` when they are not — never a tick either way
+- Token handling: `Authorization` header only, redacted out of server messages and
+  attached causes, with sentinel-based leak tests across logs, errors and `--debug`
+- Exit codes `7` (remote API), `8` (hook conflict), `9` (verification failure)
 
-- Enable the Before User Created hook on a hosted project via the Management API
-- Detect and report the real activation state in `status`, replacing "not verified"
-- Deactivate on `uninstall`, in the correct order (Auth first, then the function)
+Deliberately deferred from this branch, and the reason:
+
+- **Interactive confirmation before mutating.** `hook enable` is already an explicitly
+  named mutation command with a `--dry-run` preview; a prompt would buy little and would
+  make the command awkward to run from CI.
+- **Retries.** A GET could be retried safely and a PATCH could not, and a retry layer
+  that distinguishes them is more machinery than a foreground command needs. Post-write
+  verification, not a retry, is what protects against an ambiguous outcome.
+- **Live mutation tests against a hosted project.** Every state transition is covered
+  against a mocked API. A live read-only check exists behind
+  `SADA_TEST_SUPABASE_*`; nothing in the test suite writes to a real Auth configuration.
+- **Editing `supabase/config.toml`.** Still documented rather than automated: local
+  activation is a user-owned file, and hosted activation is what this branch covers.
+- **`uninstall`.** The correct removal order (disable remotely, then drop the database
+  objects) is documented and `hook disable` now makes the first half a single command.
 
 ## v0.5 — Strict trigger mode (opt-in)
 

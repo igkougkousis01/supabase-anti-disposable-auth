@@ -1077,9 +1077,13 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
       expect(status.hookFunctionInstalled).toBe(true);
       expect(status.health).toBe('complete');
       expect(status.missingObjects).toEqual([]);
-      expect(statusExitCode({ target: connection.target, schema: status })).toBe(
-        EXIT_CODES.success,
-      );
+      expect(
+        statusExitCode({
+          target: connection.target,
+          schema: status,
+          remote: { kind: 'not-checked' },
+        }),
+      ).toBe(EXIT_CODES.success);
     });
 
     it('reports the grants honestly for this server', async () => {
@@ -1110,9 +1114,13 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         // The migration history still claims 006 was applied, which is why object
         // probing cannot be replaced by trusting the history.
         expect(status.pending).toEqual([]);
-        expect(statusExitCode({ target: connection.target, schema: status })).toBe(
-          EXIT_CODES.guardHealth,
-        );
+        expect(
+          statusExitCode({
+            target: connection.target,
+            schema: status,
+            remote: { kind: 'not-checked' },
+          }),
+        ).toBe(EXIT_CODES.guardHealth);
       } finally {
         await connection.execute('rollback');
       }
@@ -1133,9 +1141,13 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         // it, `status` would call a hook that rejects every signup "healthy".
         expect(status.missingObjects).toEqual([]);
         expect(status.health).toBe('incomplete');
-        expect(statusExitCode({ target: connection.target, schema: status })).toBe(
-          EXIT_CODES.guardHealth,
-        );
+        expect(
+          statusExitCode({
+            target: connection.target,
+            schema: status,
+            remote: { kind: 'not-checked' },
+          }),
+        ).toBe(EXIT_CODES.guardHealth);
       } finally {
         await connection.execute('rollback');
       }
@@ -1194,9 +1206,13 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         ]);
 
         expect(status.health).toBe('incomplete');
-        expect(statusExitCode({ target: connection.target, schema: status })).toBe(
-          EXIT_CODES.guardHealth,
-        );
+        expect(
+          statusExitCode({
+            target: connection.target,
+            schema: status,
+            remote: { kind: 'not-checked' },
+          }),
+        ).toBe(EXIT_CODES.guardHealth);
       });
     });
 
@@ -1214,9 +1230,13 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         expect(repaired.authHookGrants).toBe('granted');
         expect(repaired.missingAuthHookGrants).toEqual([]);
         expect(repaired.health).toBe('complete');
-        expect(statusExitCode({ target: connection.target, schema: repaired })).toBe(
-          EXIT_CODES.success,
-        );
+        expect(
+          statusExitCode({
+            target: connection.target,
+            schema: repaired,
+            remote: { kind: 'not-checked' },
+          }),
+        ).toBe(EXIT_CODES.success);
       });
     });
 
