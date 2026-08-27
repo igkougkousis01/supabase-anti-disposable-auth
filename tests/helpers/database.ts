@@ -22,6 +22,15 @@ export interface FakeDatabaseOptions {
   readonly rowCounts?: Record<string, number>;
   /** Whether the `guard` schema already exists. */
   readonly schemaPresent?: boolean;
+  /** Roles `pg_roles` should report as existing, e.g. `supabase_auth_admin`. */
+  readonly roles?: string[];
+  /**
+   * Privileges a role holds, as `<role>` -> `["<PRIVILEGE> on <object>"]`.
+   *
+   * Anything not listed is reported as not granted, so a test that forgets to grant
+   * something sees it reported as missing rather than silently passing.
+   */
+  readonly privileges?: Record<string, string[]>;
 }
 
 export class FakeDatabase implements DatabaseConnection {
@@ -41,6 +50,7 @@ export class FakeDatabase implements DatabaseConnection {
 
   private readonly options: FakeDatabaseOptions;
   private readonly presentObjects: Set<string>;
+  private readonly roles: Set<string>;
   /** Rows written inside the current transaction, discarded on rollback. */
   private staged: AppliedMigration[] = [];
   /** Schema state as of the last commit, restored on rollback. */
@@ -51,6 +61,7 @@ export class FakeDatabase implements DatabaseConnection {
     this.schemaPresent = options.schemaPresent ?? false;
     this.committedSchemaPresent = this.schemaPresent;
     this.presentObjects = new Set(options.presentObjects ?? []);
+    this.roles = new Set(options.roles ?? []);
   }
 
   /** Seeds history as if these migrations had already been applied. */
@@ -128,6 +139,18 @@ export class FakeDatabase implements DatabaseConnection {
 
     if (sql.includes('pg_namespace')) {
       return [{ present: this.schemaPresent && parameters[0] === 'guard' }];
+    }
+
+    if (sql.includes('pg_roles')) {
+      return [{ present: this.roles.has(String(parameters[0])) }];
+    }
+
+    // has_schema_privilege / has_function_privilege / has_table_privilege all take
+    // (role, object, privilege) and are answered from the same grant table.
+    if (sql.includes('_privilege(')) {
+      const [role, object, privilege] = parameters.map(String);
+      const held = this.options.privileges?.[role ?? ''] ?? [];
+      return [{ present: held.includes(`${privilege} on ${object}`) }];
     }
 
     if (sql.includes('to_regclass') || sql.includes('to_regprocedure')) {

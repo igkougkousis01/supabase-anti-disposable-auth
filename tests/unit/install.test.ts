@@ -112,6 +112,37 @@ describe('printInstallSummary', () => {
     expect(output()).toContain('Database guard layer installed.');
   });
 
+  it('says activation is still required, and does not claim protection', () => {
+    const { logger, output } = createRecordingLogger();
+
+    printInstallSummary(
+      { target: 'db:5432/postgres', applied: [FIRST], skipped: [], currentVersion: '001' },
+      logger,
+    );
+
+    // Creating the function is not switching the protection on. `install` cannot
+    // configure Supabase Auth, so it must never let the user believe it did.
+    expect(output()).toContain('Supabase Auth activation is still required');
+    expect(output()).toContain('signups are not filtered yet');
+    expect(output()).toContain('pg-functions://postgres/guard/before_user_created');
+    expect(output()).not.toMatch(/hook (is )?(active|enabled)\b/i);
+    expect(output()).not.toMatch(/you are (now )?protected/i);
+  });
+
+  it('repeats the activation notice on a no-op run', () => {
+    const { logger, output } = createRecordingLogger();
+
+    printInstallSummary(
+      { target: 'db:5432/postgres', applied: [], skipped: [FIRST], currentVersion: '001' },
+      logger,
+    );
+
+    // An operator who runs `install` twice and only sees the caveat the first time
+    // would reasonably read the second run as confirmation that they are covered.
+    expect(output()).toContain('already up to date');
+    expect(output()).toContain('Supabase Auth activation is still required');
+  });
+
   it('says the layer is already current when nothing was applied', () => {
     const { logger, output } = createRecordingLogger();
 

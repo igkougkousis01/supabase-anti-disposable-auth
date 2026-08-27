@@ -35,18 +35,63 @@ single source of truth for everything this tool creates in PostgreSQL.
 
 The order below is forced by real dependencies, not preference:
 
-| File                              | Creates                                                 |
-| --------------------------------- | ------------------------------------------------------- |
-| `001_create_domain_functions.sql` | `guard.normalize_domain()`                              |
-| `002_create_domain_tables.sql`    | `guard.blocked_domains`, `guard.allowed_domains`        |
-| `003_create_metadata_tables.sql`  | `guard.sync_metadata`                                   |
-| `004_create_lookup_functions.sql` | `guard.is_*_domain()` lookups                           |
-| `005_permissions.sql`             | privilege revokes for `PUBLIC`, `anon`, `authenticated` |
+| File                                      | Creates                                                 |
+| ----------------------------------------- | ------------------------------------------------------- |
+| `001_create_domain_functions.sql`         | `guard.normalize_domain()`                              |
+| `002_create_domain_tables.sql`            | `guard.blocked_domains`, `guard.allowed_domains`        |
+| `003_create_metadata_tables.sql`          | `guard.sync_metadata`                                   |
+| `004_create_lookup_functions.sql`         | `guard.is_*_domain()` lookups                           |
+| `005_permissions.sql`                     | privilege revokes for `PUBLIC`, `anon`, `authenticated` |
+| `006_create_before_user_created_hook.sql` | `guard.before_user_created()` auth hook                 |
+| `007_auth_hook_permissions.sql`           | `supabase_auth_admin` grants for the hook               |
 
 `normalize_domain()` must exist before 002, because the tables' `CHECK` constraints
 call it. The lookups in 004 need the tables. The revokes in 005 use
 `... ON ALL TABLES/FUNCTIONS IN SCHEMA`, which only affect objects that already exist,
-so 005 must run last.
+so 005 had to run last at the time it was written.
+
+006 needs `guard.is_disposable_domain()` from 004, because the hook delegates its whole
+policy decision to it. 007 needs the function 006 creates, because it grants `EXECUTE`
+on it by signature.
+
+**006 and 007 are two files rather than one on purpose.** 006 is portable DDL that runs
+identically on any PostgreSQL server. 007 is entirely conditional on the Supabase role
+`supabase_auth_admin` existing, and is honestly a no-op on a plain PostgreSQL
+development database. Splitting them keeps "what the hook is" separable from "who may
+call it" — the second is the part most likely to change as Supabase's roles evolve.
+
+## Conditional migrations are applied once, condition and all
+
+`005_permissions.sql` and `007_auth_hook_permissions.sql` guard their Supabase-role
+statements with `if exists (select 1 from pg_catalog.pg_roles where rolname = '...')`,
+because those roles do not exist on a plain PostgreSQL server and an unguarded `GRANT`
+would make `install` fail there.
+
+**A migration that took its no-op branch is still applied.** It ran to completion, so it
+is recorded in `guard.schema_migrations` like any other, and the runner will never
+replay it. The condition is evaluated once, at application time — it is not a standing
+rule that re-fires when the role later appears.
+
+The concrete consequence, which is documented rather than engineered around:
+
+- If `007_auth_hook_permissions.sql` was applied while `supabase_auth_admin` did not
+  exist, **creating the role later does not cause the grants to appear.**
+- `install` will **not** replay 007. Never replaying an applied migration is what makes
+  `install` safe to run repeatedly, and is not traded away for this case.
+- `status` catches it: it probes each required privilege with `has_*_privilege()`
+  against the live catalog instead of trusting the history, names what is missing, and
+  exits non-zero.
+- The remediation is an idempotent, role-guarded grant snippet documented in
+  [Repairing the auth hook grants](../README.md#repairing-the-auth-hook-grants). It
+  grants only the privileges 007 grants and touches no history.
+
+This is rare in practice — hosted Supabase and `supabase start` both provide
+`supabase_auth_admin` long before this tool is installed.
+
+**Rule 1 applies here with no exception:** do not edit an applied migration, and do not
+delete its history row to force a replay. Both defeat the checksum audit. Repair the
+database state directly with a documented, idempotent snippet, or drop the `guard`
+schema and reinstall.
 
 ## Bootstrap infrastructure: `guard` and `guard.schema_migrations`
 
@@ -95,3 +140,9 @@ it runs, but it does **not** try to protect future ones with
 The real containment is the schema `USAGE` revoke: without `USAGE` on `guard`, a role
 cannot call anything inside it whatever `EXECUTE` grants exist. Rule 8 above is the
 required follow-up for any migration that adds a function.
+
+`006_create_before_user_created_hook.sql` is the first migration to exercise rule 8 in
+anger, and it is worth noting why the rule is not optional there: the hook is the one
+function in this schema whose whole purpose is to answer a policy question. Leaving it
+`PUBLIC`-executable would turn it into a blocklist-enumeration oracle for anyone who
+later acquires `USAGE` on `guard`.

@@ -43,14 +43,51 @@ executing it, and `uninstall` support for the new objects.
 Deliberately deferred from this branch: retries, scheduled sync, custom blocklist URLs,
 a `--provider` flag (there is one provider), and `status` reporting sync freshness.
 
-## v0.4 — Supabase Before User Created hook
+## v0.4 — Supabase Before User Created hook (database layer) — **Done**
 
-**Not implemented.** Nothing calls `guard.is_disposable_domain()` during signup yet, so
-a synchronised blocklist still filters nothing.
+- `guard.before_user_created(event jsonb) returns jsonb`, matching the current Supabase
+  Auth hook contract (verified against `supabase/auth`, not against examples)
+- Policy delegated entirely to `guard.is_disposable_domain()` — the hook holds no
+  lookup logic of its own, asserted by a test comparing both verdicts
+- Explicit missing-email behaviour: absent, `null`, `""` and whitespace emails all
+  **allow**, so phone-only and anonymous signups are never collateral damage
+- Explicit malformed-payload behaviour: a non-object event rejects as structural
+  corruption, and a `user.email` that is present but not a JSON string rejects as a
+  contract violation — both with the same generic 5xx response. A well-formed object
+  that simply carries no email still allows
+- **Fails closed** when the policy engine raises, with a generic client message and
+  full `SQLSTATE` diagnostics kept in the PostgreSQL server log
+- `SECURITY INVOKER` with a least-privilege grant set for `supabase_auth_admin` — read
+  only, no writes, nothing for `PUBLIC` / `anon` / `authenticated`
+- `status` reports the hook function and the grants, and reports activation as **not
+  verified**; a missing function or grant is a health failure with exit code `5`
+- Live-database tests covering policy, allowlist precedence, case normalisation,
+  missing and malformed events, damaged-lookup fail-closed behaviour, privilege
+  boundaries, side-effect freedom and execution under `SET ROLE supabase_auth_admin`
 
-- Hook function in the `guard` schema
-- Registration and unregistration through `install` / `uninstall`
-- Clear rejection message returned to the client
+Deliberately deferred from this branch, and the reason:
+
+- **Activation.** `install` creates the function; it does not tell Supabase Auth to
+  call it. The database contract needed to be testable before the CLI is given control
+  of a project's hosted Auth configuration.
+- Editing a user's `supabase/config.toml` automatically — documented instead.
+- `uninstall` support for the hook, beyond documenting the required removal order.
+- **A privilege-repair subsystem.** `007_auth_hook_permissions.sql` grants
+  conditionally on `supabase_auth_admin` existing, and applied migrations are never
+  replayed, so a database that gained the role after installation keeps missing grants.
+  `status` detects and names that, and the remediation is a documented idempotent
+  snippet (README → _Repairing the auth hook grants_). A `repair` command is a separate
+  design question — what it may change, what it must refuse to change, and how it
+  proves it did no harm — and is not started in this branch.
+
+## v0.4.1 — Hook activation
+
+**Not implemented.** Until an operator activates the hook themselves, no signup is
+filtered.
+
+- Enable the Before User Created hook on a hosted project via the Management API
+- Detect and report the real activation state in `status`, replacing "not verified"
+- Deactivate on `uninstall`, in the correct order (Auth first, then the function)
 
 ## v0.5 — Strict trigger mode (opt-in)
 

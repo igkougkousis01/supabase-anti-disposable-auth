@@ -1,9 +1,12 @@
 # Architecture
 
-> **Status:** the CLI foundation, the `guard` schema, the database policy engine and
-> manual blocklist synchronisation exist today. The Supabase Auth Hook does **not**, and
-> neither does `pg_cron` scheduling. Everything marked **Planned** below is not
-> implemented, and no signup is filtered yet.
+> **Status:** the CLI foundation, the `guard` schema, the database policy engine, manual
+> blocklist synchronisation and the **Before User Created hook function** exist today.
+> What does **not** exist is automatic _activation_ of that hook in Supabase, and
+> `pg_cron` scheduling. Everything marked **Planned** below is not implemented.
+>
+> Installing the hook function is not the same as switching protection on. Until an
+> operator configures Supabase Auth to call it, no signup is filtered.
 
 ## Overview
 
@@ -22,7 +25,8 @@ guard schema
  ├── allowed_domains
  ├── sync_metadata
  ├── normalize_domain()
- └── is_disposable_domain()
+ ├── is_disposable_domain()
+ └── before_user_created()
 ```
 
 Blocklist data reaches that schema through the synchronisation pipeline:
@@ -43,17 +47,39 @@ guard.blocked_domains
 guard.is_disposable_domain()
 ```
 
-The policy engine is complete and correct in isolation, but nothing calls it yet. It is
-a library inside the database, not an active filter.
-
-**Planned** — how it will be wired into signups in a later branch:
+And that data is consulted at signup time through the auth hook:
 
 ```text
+Remote blocklist
+      ↓
+Safe manual sync
+      ↓
+guard.blocked_domains
+      ↓
+guard.is_disposable_domain()          the one policy engine
+      ↑
+      │  delegates to
+      │
+guard.before_user_created(event)      installed by `install`
+      ↑
+      │  ⚠️ ONLY ACTIVE once Supabase Auth is configured
+      │     to call this function. `install` does not do
+      │     this, and cannot observe whether it was done.
+      │
 Supabase Auth
       ↓
-Before User Created Hook        <- planned, not implemented
-      ↓
-guard.is_disposable_domain()    <- exists today
+allow  {}      /      reject  {"error": {...}}
+```
+
+Every arrow above except the one from **Supabase Auth** is created by `install` and
+`sync`. That one arrow is configuration inside the Auth service, not an object in
+PostgreSQL, so the database can neither create it nor see it. This is the single most
+important distinction in the current design, and the CLI is built so that no output can
+blur it:
+
+```text
+function installed        ≠        Auth Hook enabled
+   (install does this)              (a human does this)
 ```
 
 The design principle is that enforcement lives in the database, not in the CLI. The CLI
@@ -115,6 +141,7 @@ application schema, and `auth.users` is never touched.
 | `is_blocked_domain(text)`    | Blocklist membership.                                                                                                           |
 | `is_allowed_domain(text)`    | Allowlist membership.                                                                                                           |
 | `is_disposable_domain(text)` | The policy answer, with allowlist precedence.                                                                                   |
+| `before_user_created(jsonb)` | The Supabase auth hook. Extracts an email and delegates; owns no policy of its own.                                             |
 
 #### Migration system
 
@@ -237,9 +264,27 @@ would cost write throughput during list reconciliation and buy nothing.
   and adding it would widen the blast radius for no gain.
 - Every function pins `search_path = ''` and fully qualifies `guard` objects, so no
   session setting can change what they resolve to.
-- Nothing is granted to `supabase_auth_admin`. The auth hook does not exist, so the role
-  that would eventually call the lookup has no reason to reach the schema yet. Those
-  grants arrive with the hook.
+- `supabase_auth_admin` is granted exactly the `SECURITY INVOKER` call chain the hook
+  needs, and nothing else:
+
+  | Grant                                           | Why                               |
+  | ----------------------------------------------- | --------------------------------- |
+  | `USAGE` on schema `guard`                       | reach anything at all             |
+  | `EXECUTE` on `guard.before_user_created(jsonb)` | the hook itself                   |
+  | `EXECUTE` on `guard.is_disposable_domain(text)` | the policy engine it delegates to |
+  | `EXECUTE` on `guard.normalize_domain(text)`     | called by that engine             |
+  | `SELECT` on `guard.blocked_domains`             | the lookup                        |
+  | `SELECT` on `guard.allowed_domains`             | the lookup                        |
+
+  Deliberately **not** granted: `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE` or `REFERENCES`
+  anywhere; `CREATE` on the schema; anything on `sync_metadata` or `schema_migrations`;
+  and `EXECUTE` on `is_blocked_domain()` / `is_allowed_domain()`, which the hook never
+  calls. A write grant here would let a compromised auth service allowlist a domain and
+  walk straight through its own filter.
+
+  The `SELECT` grants name the two tables individually rather than using
+  `ON ALL TABLES IN SCHEMA guard`, which would also hand over `sync_metadata` and would
+  silently widen itself every time a future migration adds a table.
 
 **Ownership:** every object is owned by the role behind `SUPABASE_DB_URL` — normally
 `postgres` on Supabase. That owner and superusers retain full access implicitly.
@@ -277,20 +322,323 @@ The practical consequence, enforced by an integration test rather than by conven
 that no function in `guard` is executable by `PUBLIC`, so a migration that forgets fails
 the build.
 
-### 4. Auth Hook (**Planned**)
+### 4. Auth Hook (function implemented; activation manual)
 
 Supabase's **Before User Created** hook lets a PostgreSQL function inspect a signup
-before the user row is created. The tool will register a function in the `guard` schema
-as that hook and return a rejection for disposable domains.
+before the user row is created. `guard.before_user_created(jsonb)` is that function.
+This is the primary enforcement path: it covers every signup route into the project and
+produces a clean error for the client.
 
-This is the primary enforcement path because it covers every signup route into the
-project and produces a clean error for the client.
+#### Invocation contract
 
-### 5. Blocklist lookup (implemented, not yet wired to signups)
+Verified against `supabase/auth` (`internal/hooks/hookspgfunc`, `internal/hooks/
+hookserrors`, `internal/hooks/v0hooks`) and the Supabase CLI's own generated
+`config.toml`, not against secondary examples:
 
-The lookup function is complete and tested. What is missing is only the caller: nothing
-invokes it during authentication yet, so installing this tool does not currently reject
-any signup.
+```sql
+guard.before_user_created(event jsonb) returns jsonb
+```
+
+Supabase Auth executes, literally:
+
+```sql
+set local statement_timeout to '2000';
+select "guard"."before_user_created"($1);
+```
+
+inside **the same transaction that would create the user**. Three consequences follow,
+and the implementation depends on all three:
+
+1. Anything the function raises aborts the signup transaction, so the user is not
+   created. Raising is therefore already fail-closed — but it hands the client a raw
+   database error, which is why the policy call is wrapped instead.
+2. The 2-second `statement_timeout` raises `query_canceled` (57014), which PL/pgSQL's
+   `when others` deliberately does **not** catch. A slow hook is cancelled and the
+   signup fails closed, with no timeout logic in this codebase.
+3. A caught exception must roll back cleanly or it poisons the outer transaction. The
+   handler sits in a nested block, so PL/pgSQL wraps it in a subtransaction and the
+   clean error response still reaches the client.
+
+#### Response contract
+
+| Decision | Response                                                                                             |
+| -------- | ---------------------------------------------------------------------------------------------------- |
+| Allow    | `{}`                                                                                                 |
+| Reject   | `{"error": {"http_code": 403, "message": "Disposable email addresses are not allowed."}}`            |
+| Failure  | `{"error": {"http_code": 503, "message": "Signup could not be validated. Please try again later."}}` |
+
+Two details of the GoTrue contract are load-bearing:
+
+- **`message` must be non-empty.** `hookserrors.check()` returns `nil` — meaning "no
+  error", meaning **allow** — when the message is blank. An error object with an empty
+  message would silently disable the entire filter. Both rejection responses are
+  compile-time string literals, so this cannot happen by construction, and an
+  integration test asserts it.
+- **`http_code` is passed through verbatim**, defaulting to 500 when absent. The code is
+  this tool's choice, not a fixed enum.
+
+**Why 403 and not 400.** Supabase Auth already returns 400 for its own validation
+failures — malformed address, weak password, user already registered. Reusing it would
+make a policy rejection indistinguishable from a malformed request for any client trying
+to render a useful message. 403 says the request was understood and refused, which is
+what happened. Supabase's own documentation example uses 400; this is a deliberate,
+compatible divergence, since the field is free-form.
+
+**Why 503 for engine failure.** A policy rejection and an unavailable policy engine are
+different events. A client, a log line and an alert should all be able to tell them
+apart, and 500 is what GoTrue itself returns for its own internal errors.
+
+#### Decision table
+
+| Input                                     | Result       | Reason                              |
+| ----------------------------------------- | ------------ | ----------------------------------- |
+| Non-disposable email                      | allow        | policy                              |
+| Disposable email                          | reject 403   | policy                              |
+| Disposable **and** allowlisted            | allow        | allowlist precedence, in the engine |
+| Unknown domain                            | allow        | policy                              |
+| Absent / `null` / `""` / whitespace email | allow        | nothing to judge                    |
+| Non-string email (`123`, `true`, `[]`)    | reject 503   | malformed hook payload              |
+| `event` not a JSON object, or SQL `NULL`  | reject 503   | structural corruption               |
+| Policy engine raises                      | reject 503   | fail closed                         |
+| Hook exceeds 2 s                          | signup fails | GoTrue cancels the statement        |
+
+#### One policy engine
+
+The hook contains **no lookup logic**. It extracts an address and calls
+`guard.is_disposable_domain()`, which owns normalisation and allowlist precedence. If
+the hook duplicated either, the two could drift and the allowlist could stop working on
+the one path that matters. An integration test compares the hook's verdict against the
+engine's across a corpus of inputs, so a divergence fails the build.
+
+#### Missing email: a deliberate fail-open
+
+Supabase serialises a user's email as a Go `NullString`, so a phone-only or anonymous
+signup arrives as `"email": ""` — not as an absent key, and not as JSON `null`. Those
+signups are **allowed**.
+
+This is a fail-open for the **absence of an email**, and it is the opposite of the
+decision taken for engine failure a few lines down. The two cases are distinguished
+carefully throughout the implementation:
+
+```text
+"there is no email to check"   ->  allow    (a supported signup flow)
+"the check did not work"       ->  reject   (a security control that failed)
+```
+
+Blocking email-less signups would mean a disposable-**email** filter silently disabling
+phone and anonymous auth — a far worse failure than the one it prevents. This tool
+enforces policy only where an email exists; phone-only and anonymous flows are outside
+its scope.
+
+#### Malformed events
+
+The line between "corrupt" and "no email" is drawn at the **outermost structure only**:
+
+- `NULL`, a JSON scalar, or a JSON array → **reject**. GoTrue always sends an object, so
+  anything else means the function is not being called under the contract it was written
+  for — a hook wired to the wrong extensibility point, or a caller that is not Supabase
+  Auth. A hook that cannot confirm who is asking must not hand out approvals.
+- `{}`, `{"user": null}`, `{"user": {}}`, `{"user": {"email": null}}` → **allow**. These
+  are well-formed objects that simply carry no email.
+
+No unchecked casts: `->` and `->>` return `NULL` rather than raising for a missing key
+or a non-object parent, and the email's JSON type is resolved with `jsonb_typeof()`
+before `->>` is used. Without that check, `"email": 12345` would be coerced to the text
+`'12345'` and fed to the policy engine as though it were an address.
+
+#### Malformed email type: a separate verdict from "no email"
+
+The type gate is not the structural gate, and its answer is not the absent-email
+answer. `user.email` is judged on its JSON type:
+
+| `jsonb_typeof(event -> 'user' -> 'email')`        | Verdict        |
+| ------------------------------------------------- | -------------- |
+| `NULL` (key absent, or no object parent)          | allow          |
+| `'null'`                                          | allow          |
+| `'string'`                                        | policy decides |
+| `'number'` / `'boolean'` / `'array'` / `'object'` | reject 503     |
+
+**Why absent, `null` and `""` allow but a non-string does not.** Supabase legitimately
+represents non-email flows with an empty or `null` email: GoTrue serialises the
+candidate address from a Go `NullString`, so a phone-only or anonymous signup arrives
+with the field present and empty. That payload is under the contract and carries nothing
+to judge.
+
+A non-string value is not under the contract. `user.email` is a Go string field, and no
+GoTrue release serialises it as a number, boolean, array or object. Receiving one means
+the payload did not come from the hook contract this function implements — the same
+class of event as a non-object `event`, and answered the same way. The hook cannot know
+what it is being asked, so it does not approve.
+
+Reading a non-string as "no usable email, therefore allow" is the failure this rule
+exists to prevent: `{"user": {"email": ["person@mailinator.com"]}}` would pass a
+disposable-email filter that never looked at an address, silently.
+
+**One response for every unavailable-validation case.** Malformed payload, structural
+corruption and engine failure all return the identical 503 literal. It names no field,
+no type and no value, so a client cannot distinguish them or probe the payload contract
+through signup. The offending JSON **type** — never the value — is written to the
+PostgreSQL server log with `RAISE LOG`, which the client never receives.
+
+#### Fail closed on infrastructure failure
+
+If `guard.is_disposable_domain()` raises — dropped table, revoked privilege,
+half-removed installation — the hook **rejects** with the 503 response.
+
+A policy engine that cannot answer has not said "allow"; it has said nothing. Treating
+silence as approval would mean one revoked privilege quietly disabling the whole filter
+while every signup keeps succeeding — the failure nobody notices until the disposable
+accounts arrive.
+
+The handler is scoped to the single policy statement rather than wrapped around the
+whole body, for two reasons:
+
+- **Intent.** It exists for policy-_engine_ failure, not as a catch-all that would hide
+  bugs in the extraction above it.
+- **Cost.** A block with an exception handler establishes a subtransaction each time it
+  is entered. Scoping it here means email-less signups, which return earlier, never pay
+  for one — measurably ~30× cheaper on that path.
+
+Diagnostics are preserved without leaking: `RAISE LOG` writes the real `SQLSTATE` and
+message to the **PostgreSQL server log**, and `LOG` sits above the default
+`client_min_messages`, so the caller never receives it. The candidate address is
+deliberately not logged — it is unverified user input, and this is not an audit trail.
+
+#### SECURITY INVOKER, and why not DEFINER
+
+The hook is `SECURITY INVOKER`. It runs with exactly the privileges of
+`supabase_auth_admin` and borrows nothing, which is why that role needs the whole call
+chain rather than one `EXECUTE` — see [Privileges](#privileges).
+
+`SECURITY DEFINER` would reduce the grants to schema `USAGE` plus one `EXECUTE`. It was
+considered and refused:
+
+- The two `SELECT`s it saves are read-only access to a public disposable-domain list and
+  an operator allowlist. Neither holds a secret.
+- The one thing a client must not learn — whether a given domain is blocked — is
+  obtainable by anyone who can call the hook in **either** mode, so DEFINER would not
+  actually close that channel.
+- In exchange, it would execute as the schema owner (`postgres` on Supabase) on a
+  payload supplied by an external system, on the signup hot path. That is a real
+  privilege boundary being crossed to avoid two read grants on non-secret tables.
+
+"Make the permissions work" is not a justification for `SECURITY DEFINER`, and it is the
+only one available here. The `guard` schema therefore remains entirely free of
+`SECURITY DEFINER`, which an integration test asserts.
+
+#### Side-effect free
+
+Invoking the hook modifies no blocked domain, no allowed domain, no sync metadata and no
+`auth.users` row; it creates nothing, takes no lock and calls no remote service. An
+integration test snapshots every table and re-checks it after exercising every branch —
+allow, reject, allowlist override, no email, absent user, structural corruption and
+malformed email type — including outside a transaction where a write could not be
+hidden by a rollback.
+
+#### Performance
+
+The hot path is: extract → normalise → allowlist primary-key lookup → blocklist
+primary-key lookup → return. No HTTP, no DNS, no table scan, no logging table, no
+additional index.
+
+Measured locally on PostgreSQL 14 with 75,001 blocked domains, executing as
+`supabase_auth_admin`:
+
+| Path                    | Per call |
+| ----------------------- | -------- |
+| Allow (non-disposable)  | ~40 µs   |
+| Reject (disposable)     | ~41 µs   |
+| No email (early return) | ~1.3 µs  |
+
+`EXPLAIN` confirms an `Index Only Scan using blocked_domains_pkey` (4 buffer hits) on
+the same dataset. Against Supabase's 2-second budget this is roughly 0.002%. No new
+index was added: the primary key already serves every lookup optimally.
+
+#### Conditional grants and the role that arrives late
+
+`007_auth_hook_permissions.sql` wraps every `GRANT` in
+`if exists (select 1 from pg_catalog.pg_roles where rolname = 'supabase_auth_admin')`.
+The guard is not optional: the role does not exist on a plain PostgreSQL server, and an
+unguarded `GRANT` would make `install` fail there. Combined with the runner's rule that
+**applied migrations are never replayed**, that produces one edge case, and it is
+documented here rather than engineered around.
+
+**The case.** 007 runs on a database without `supabase_auth_admin`. It takes its no-op
+branch, completes successfully, and is recorded in `guard.schema_migrations` —
+correctly, because it did run. The role is created afterwards. **The grants do not
+appear.** Nothing re-evaluates that `if exists`: a `GRANT` writes an ACL entry, it does
+not install a rule that fires when a matching role shows up later. And `install` will
+not re-run 007, because re-running recorded migrations is precisely the property that
+makes `install` safe to run repeatedly.
+
+The result is a database where the hook function exists, the role exists, and the role
+cannot execute the hook.
+
+**Why not detect and re-run 007.** Replaying a recorded migration on a role-existence
+condition would mean the runner deciding, per migration, whether a previous application
+"counted". That is a different execution model from the one the checksum audit is built
+on — every file applied exactly once, verifiable afterwards — and adopting it for one
+conditional file would weaken the guarantee for all of them. A general privilege-repair
+subsystem is a real design question (what it may change, what it must refuse to change,
+how it proves it did no harm) and is deliberately out of scope for this branch.
+
+**What happens instead, in three parts:**
+
+1. **`status` reports it.** Grants are probed with `has_*_privilege()` against the live
+   catalog, never inferred from the migration history, so the gap is visible even though
+   the history says 007 applied. Each missing privilege is named, the installation is
+   `incomplete`, and the process exits non-zero — before activation, which is the point
+   at which the gap would start rejecting every signup.
+2. **`status` says `install` will not fix it,** and points at the documented
+   remediation rather than at a command that would report "up to date" and change
+   nothing.
+3. **The remediation is one idempotent, role-guarded snippet** in the README
+   ([Repairing the auth hook grants](../README.md#repairing-the-auth-hook-grants)). It
+   grants exactly the six privileges 007 grants — the `SECURITY INVOKER` call chain and
+   nothing wider — is safe to run repeatedly and on a server without the role, and
+   touches no migration history. Dropping the `guard` schema and reinstalling is the
+   supported alternative.
+
+**Editing `guard.schema_migrations` or re-running a historical migration file by hand is
+not a supported remediation and is documented as such.** Deleting a history row to force
+a replay defeats the checksum audit the runner exists to provide, and applying old DDL
+by hand can land it out of order relative to migrations written after it.
+
+**How likely this is.** Uncommon. Both hosted Supabase projects and `supabase start`
+provision `supabase_auth_admin` as part of the platform, well before this tool is
+installed, so a normal installation grants on its first run. The realistic paths in are
+a plain PostgreSQL database that later gained Supabase roles, a restore into a cluster
+whose roles were not restored with it, and development scratch databases.
+
+#### Activation is not automated
+
+`install` creates the function and the grants. It does **not** register the hook with
+Supabase Auth, and it deliberately does not edit a user's `config.toml`. Activation is
+documented in the README and automating it through the Management API is a separate
+branch — the separation exists so the database contract could be tested before the CLI
+is given control of hosted Auth configuration.
+
+Because activation lives in the Auth service rather than in PostgreSQL, `status` cannot
+observe it. It reports the function and the grants, and reports activation as **not
+verified** — never as a tick.
+
+#### Removal ordering
+
+Removing the hook has a required order:
+
+1. **Disable the Auth Hook in Supabase first.**
+2. **Then** drop the function and revoke the grants.
+
+Reversed, Supabase Auth keeps calling a function that no longer exists and **every
+signup fails** until the configuration catches up. Full `uninstall` is not implemented;
+this ordering is documented so a manual removal does not break a live project.
+
+### 5. Blocklist lookup (implemented)
+
+`guard.is_disposable_domain()` is the single policy engine. It is called by the auth
+hook, and can be called directly by an operator inspecting policy. Its behaviour is
+unchanged by this branch — the hook was built around it rather than the other way
+round.
 
 ### 6. Blocklist synchronisation (implemented, manual only)
 
@@ -609,6 +957,11 @@ These are opt-in and explicitly **not** part of the default install:
 - **`pg_cron` synchronisation.** Scheduling blocklist refreshes inside the database, so
   the list stays current without the CLI running. Requires the extension to be available
   and enabled in the project. Sync itself exists today, but only as a manual command.
+- **Hook activation through the Supabase Management API.** Enabling the Before User
+  Created hook on a hosted project without a dashboard visit. Deferred deliberately: the
+  database contract needed to be testable before the CLI is given control of a project's
+  hosted Auth configuration, and a tool that can silently turn authentication rules on
+  and off is a much larger trust ask than one that installs a function.
 
 ## Safety principles
 
@@ -621,8 +974,15 @@ These are opt-in and explicitly **not** part of the default install:
 4. **Secret-safe.** Connection strings are never logged, written to disk, or passed as
    process arguments; all values in SQL are bound parameters.
 5. **Honest.** `status` reports unbuilt features as not configured rather than omitting
-   them, so the output can never imply protection that does not exist.
-6. **Fail-safe.** A failed update must never destroy the last known-good blocklist.
+   them, so the output can never imply protection that does not exist. The strongest
+   form of this rule is the auth hook: the tool knows the function is installed and
+   knows it cannot tell whether the hook is activated, and it says exactly that. It
+   never converts "I installed the thing that would do the work" into "you are
+   protected".
+6. **Fail closed where silence is dangerous.** Absence of an email is answered with
+   allow; a policy engine that cannot answer is answered with reject. The distinction is
+   deliberate, and neither case is allowed to borrow the other's default.
+7. **Fail-safe.** A failed update must never destroy the last known-good blocklist.
    Stale-but-known-good beats fresh-but-wrong: a week-old blocklist still blocks what it
    knew about, whereas a blocklist replaced by forty entries protects nothing and nobody
    finds out until the disposable signups arrive.
@@ -655,6 +1015,30 @@ control. The governing rule:
 | Credential leakage through sync                | The upstream request carries no credential at all — no token, no cookie, no `Authorization`. Failure messages stored in `error_message` are `AppError` messages only, never a cause or a stack.    |
 | SSRF via a caller-supplied URL                 | Not possible: there is no flag, environment variable or config file that sets a blocklist URL. Providers are compiled in.                                                                          |
 
+## Auth hook threat model
+
+The hook is the first component that runs inside somebody else's authentication flow,
+on input this tool did not author, on the signup hot path. That combination earns its
+own table.
+
+| Concern                                                                           | Mitigation                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Hook unavailable** — broken function, permission mismatch, half-removed install | Fails **closed**: the signup is rejected, never approved. `status` health-checks both the function's existence and every required `supabase_auth_admin` grant, and exits non-zero, so the breakage is visible before activation. Integration tests exercise every damage mode (dropped function, dropped table, revoked `SELECT`, revoked `EXECUTE`) **under the real role**. |
+| **Malformed hook event**                                                          | Safe JSON extraction only: `->`/`->>` return `NULL` rather than raising, the email's type is checked with `jsonb_typeof()` before use, and there are no unchecked casts. Missing-email behaviour is explicit and tested against `{}`, `{"user": null}`, `{"user": {}}`, `{"user": {"email": null}}`, `""` and non-string values.                                              |
+| **Privilege escalation through the hook**                                         | `SECURITY INVOKER`, so nothing is borrowed from the owner. `search_path` pinned to `''` with every object fully qualified. No write privilege of any kind for `supabase_auth_admin`. No `EXECUTE` for `PUBLIC`, `anon` or `authenticated` — asserted with `has_function_privilege()`, which resolves inherited privileges.                                                    |
+| **Policy bypass**                                                                 | The hook delegates exclusively to `guard.is_disposable_domain()` and holds no lookup logic that could drift from it. Allowlist precedence and case normalisation are tested through the hook, and an integration test asserts the hook's verdict matches the engine's for every input.                                                                                        |
+| **Blocklist enumeration via signup**                                              | The client-facing message is a constant that names no domain, list, provider or mechanism, and the same message is returned for every policy rejection. The hook is not executable by `PUBLIC`, `anon` or `authenticated`, so it cannot be called directly as an oracle.                                                                                                      |
+| **Internal details leaking to the signup client**                                 | Both rejection responses are compile-time string literals — nothing computed, nothing interpolated, so there is no path by which a `SQLSTATE`, table name or provider could reach a client. Real diagnostics go to the PostgreSQL server log via `RAISE LOG`, which is not sent to the client.                                                                                |
+| **An empty message silently allowing the signup**                                 | GoTrue treats an error object whose `message` is empty as "no error" and **allows** the signup. Both messages are non-empty literals, and an integration test asserts every rejection carries a non-empty message and a 4xx/5xx code.                                                                                                                                         |
+| **Phone-only or anonymous signups blocked as collateral**                         | Absence of an email is an explicit allow, decided before the policy engine is ever consulted — so an unreachable blocklist cannot block an email-less signup either. Tested on the real Supabase payload shape (`"email": ""`), including with the policy engine deliberately broken.                                                                                         |
+| **A slow hook stalling or timing out signups**                                    | Hot path is two primary-key lookups; measured at ~40 µs against a 75,000-domain list, ~0.002% of Supabase's 2-second budget. If it ever did overrun, `query_canceled` is deliberately not caught by `when others`, so the transaction aborts and the signup fails closed.                                                                                                     |
+| **A caught error poisoning the signup transaction**                               | The handler sits in a nested block, so PL/pgSQL rolls back only its subtransaction. Asserted by a test that runs a query after a caught failure and requires it to succeed.                                                                                                                                                                                                   |
+| **The hook mutating policy or auth data**                                         | No `INSERT`/`UPDATE`/`DELETE` grant exists for the role, and the function contains no write statement. A test snapshots every table across all six branches, including outside a transaction where a write could not be hidden by a rollback.                                                                                                                                 |
+| **The hook reaching the network**                                                 | No HTTP, DNS, `dblink`, FDW or extension call — asserted against the function's own definition. There is no code path from a signup to an outbound request.                                                                                                                                                                                                                   |
+| **Believing you are protected when you are not**                                  | `install` prints the activation requirement on **every** successful run, including no-ops. `status` prints "function installed" and "activation not verified" as two independent lines and never infers the second from the first. Unit tests assert no output ever reads as an activation or protection claim.                                                               |
+| **Removing the function while the hook is still enabled**                         | Documented ordering: disable the Auth Hook in Supabase **first**, then remove the database objects. Reversed, Auth calls a missing function and every signup fails.                                                                                                                                                                                                           |
+| **A vacuous privilege test passing on plain PostgreSQL**                          | Role-dependent tests skip explicitly when `supabase_auth_admin` is absent rather than looping zero times, and `status` reports grants as "not checked" rather than "granted" on a server without the role.                                                                                                                                                                    |
+
 ## Database threat model
 
 Concerns specific to the database layer, and what answers each one.
@@ -670,7 +1054,9 @@ Concerns specific to the database layer, and what answers each one.
 | A future migration adding a world-executable function | `ALTER DEFAULT PRIVILEGES` cannot prevent this (see above), so an integration test asserts no function in `guard` is `PUBLIC`-executable. A migration that omits the revoke fails the build.                                                                                                                  |
 | Falsely reporting a damaged install as healthy        | `status` probes every expected table and function individually instead of trusting the migration history, and reports `Incomplete installation` when any is absent.                                                                                                                                           |
 | The tool altering privileges outside `guard`          | No role-global `ALTER DEFAULT PRIVILEGES` is issued. An integration test asserts `pg_default_acl` holds no role-global row.                                                                                                                                                                                   |
-| Broken allowlist precedence                           | Precedence is a single unconditional early return, covered by unit and live-database tests including the both-lists case.                                                                                                                                                                                     |
+| Broken allowlist precedence                           | Precedence is a single unconditional early return, covered by unit and live-database tests including the both-lists case, and re-tested through the auth hook.                                                                                                                                                |
+| A migration widening `supabase_auth_admin`'s reach    | Grants name each object individually rather than using `ON ALL TABLES IN SCHEMA`, so a future table is not handed over by accident. Integration tests assert the role has no write privilege on any policy table and no access to `sync_metadata` or `schema_migrations`.                                     |
+| `status` reporting a hook the auth role cannot run    | Grants are probed with `has_*_privilege()` and a missing one makes the installation `incomplete` with exit code `5`, so the breakage is caught before an operator activates the hook.                                                                                                                         |
 | Migration partial failure                             | Each migration and its history row share one transaction. A failed migration leaves no row, so a re-run resumes from the last success.                                                                                                                                                                        |
 | Concurrent installs                                   | Session advisory lock; the second run fails fast instead of interleaving DDL.                                                                                                                                                                                                                                 |
 | Credential leakage in logs                            | Connection strings never printed — only `host:port/database` via `describeConnectionTarget()`. Asserted in tests for both `install` and `status`.                                                                                                                                                             |

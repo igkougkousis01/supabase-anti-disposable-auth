@@ -2,9 +2,13 @@
 
 ## Project status
 
-This project is in early development. The CLI, the `guard` database schema and manual
-blocklist synchronisation exist; the Supabase auth hook does not, so no signup is
-filtered yet. There is no released version and no supported production deployment.
+This project is in early development. The CLI, the `guard` database schema, manual
+blocklist synchronisation and the **Before User Created hook function** exist.
+
+**Installing the hook function does not switch protection on.** Supabase Auth must be
+configured to call it, which this version does not automate and cannot observe. Until an
+operator does that, no signup is filtered. There is no released version and no supported
+production deployment.
 
 | Version | Supported                |
 | ------- | ------------------------ |
@@ -33,8 +37,39 @@ volunteer-maintained project, so there is no guaranteed response time.
 
 ## Scope
 
-In scope: anything in this repository — the CLI, the database access layer, and (once
-they exist) the SQL objects it installs into your project.
+In scope: anything in this repository — the CLI, the database access layer, and the SQL
+objects it installs into your project, including the auth hook.
+
+Security properties of the hook that are explicitly in scope, and worth reporting if you
+can break any of them:
+
+- **It fails closed.** A way to make the hook return allow when the policy engine cannot
+  answer — a dropped object, a revoked privilege, any error — is a vulnerability.
+- **It cannot be made to allow a blocked domain.** Any input that reaches allow while
+  `guard.is_disposable_domain()` would say true is a vulnerability. Note that the
+  allowlist deliberately wins over the blocklist; that is the intended rule, not a bypass.
+- **It leaks nothing to the signup client.** Any path by which a table name, function
+  name, provider, `SQLSTATE`, or the blocklist's contents reach a client is a
+  vulnerability. So is any way to use signup responses to enumerate the blocklist beyond
+  the single bit that a rejection unavoidably reveals about the address just submitted.
+- **It grants no more than it needs.** A way for `supabase_auth_admin` to write to the
+  policy tables, or for `PUBLIC` / `anon` / `authenticated` to execute the hook or read
+  the lists, is a vulnerability.
+- **It cannot be turned into an escalation primitive.** The hook is `SECURITY INVOKER`
+  with a pinned `search_path`; a way to make it execute with the owner's privileges, or
+  to redirect what its identifiers resolve to, is a vulnerability.
+- **It has no side effects.** A way to make invoking the hook write data, take a lock, or
+  reach the network is a vulnerability.
+- **It refuses payloads that violate its contract.** The hook allows only what Supabase
+  Auth can actually send: a `user.email` that is absent, `null` or a string. A payload
+  that gets a non-string `user.email` — or a non-object `event` — past the gates and
+  into an allow is a vulnerability, because the address was never checked.
+
+Out of scope for the hook: that a **phone-only or anonymous signup is not blocked**. The
+hook allows every signup that carries no email, deliberately — this tool enforces
+disposable-_email_ policy only where an email exists, and blocking email-less flows
+would silently disable phone and anonymous auth. Likewise, that installing the tool
+without activating the hook filters nothing is documented behaviour, not a flaw.
 
 Out of scope: vulnerabilities in Supabase, PostgreSQL, or third-party dependencies.
 Report those to their respective maintainers.

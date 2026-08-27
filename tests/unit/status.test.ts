@@ -46,6 +46,7 @@ const ALL_GUARD_OBJECTS = [
   'guard.is_blocked_domain(text)',
   'guard.is_allowed_domain(text)',
   'guard.is_disposable_domain(text)',
+  'guard.before_user_created(jsonb)',
 ];
 
 const ROW_COUNTS = { 'guard.blocked_domains': 3, 'guard.allowed_domains': 1 };
@@ -60,6 +61,30 @@ function installedDatabase(): FakeDatabase {
   return new FakeDatabase({
     presentObjects: ALL_GUARD_OBJECTS,
     rowCounts: ROW_COUNTS,
+  }).seedHistory(FULL_HISTORY);
+}
+
+/**
+ * Exactly the privileges migration 007 grants, written as the status probe reports
+ * them. Kept as a literal rather than derived, so a change to the required set has to
+ * be made deliberately in both places.
+ */
+const AUTH_HOOK_GRANTS = [
+  'USAGE on guard',
+  'EXECUTE on guard.before_user_created(jsonb)',
+  'EXECUTE on guard.is_disposable_domain(text)',
+  'EXECUTE on guard.normalize_domain(text)',
+  'SELECT on guard.blocked_domains',
+  'SELECT on guard.allowed_domains',
+];
+
+/** A Supabase-shaped database: the auth role exists and holds every needed grant. */
+function supabaseDatabase(grants: string[] = AUTH_HOOK_GRANTS): FakeDatabase {
+  return new FakeDatabase({
+    presentObjects: ALL_GUARD_OBJECTS,
+    rowCounts: ROW_COUNTS,
+    roles: ['supabase_auth_admin'],
+    privileges: { supabase_auth_admin: grants },
   }).seedHistory(FULL_HISTORY);
 }
 
@@ -215,6 +240,156 @@ describe('partial and damaged installations', () => {
   });
 });
 
+describe('the Before User Created hook layer', () => {
+  it('reports the hook function as installed', async () => {
+    const report = await statusOf(installedDatabase());
+
+    expect(report.schema.hookFunctionInstalled).toBe(true);
+    expect(report.schema.missingObjects).toEqual([]);
+  });
+
+  it('treats a missing hook function as a damaged schema, not an unbuilt feature', async () => {
+    const report = await statusOf(damagedDatabase('guard.before_user_created(jsonb)'));
+
+    expect(report.schema.hookFunctionInstalled).toBe(false);
+    expect(report.schema.health).toBe('incomplete');
+    expect(report.schema.missingObjects).toEqual(['guard.before_user_created(jsonb)']);
+    // Migration 006 shipped, so its absence is damage. Reporting it as "not
+    // configured yet" would hide a guard layer that Supabase Auth cannot call.
+    expect(statusExitCode(report)).toBe(EXIT_CODES.guardHealth);
+  });
+
+  it('reports grants as present when supabase_auth_admin holds all of them', async () => {
+    const report = await statusOf(supabaseDatabase());
+
+    expect(report.schema.authHookGrants).toBe('granted');
+    expect(report.schema.missingAuthHookGrants).toEqual([]);
+    expect(report.schema.health).toBe('complete');
+  });
+
+  it('names exactly the grants that are missing', async () => {
+    const report = await statusOf(
+      supabaseDatabase(
+        AUTH_HOOK_GRANTS.filter((grant) => grant !== 'SELECT on guard.blocked_domains'),
+      ),
+    );
+
+    expect(report.schema.authHookGrants).toBe('incomplete');
+    expect(report.schema.missingAuthHookGrants).toEqual(['SELECT on guard.blocked_domains']);
+  });
+
+  it('fails the health check when the auth role cannot execute the hook', async () => {
+    // Once the hook is activated in Supabase, a missing grant means the policy call
+    // raises and every signup is rejected. That is a broken guard layer, and `status`
+    // must be able to catch it before an operator flips the switch.
+    const report = await statusOf(supabaseDatabase(['USAGE on guard']));
+
+    expect(report.schema.health).toBe('incomplete');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.guardHealth);
+  });
+
+  it('requires the whole SECURITY INVOKER call chain, not just EXECUTE on the hook', async () => {
+    // A hook that can be invoked but cannot read the blocklist is worse than useless:
+    // it fails closed on every signup. EXECUTE on the entry point is not sufficient.
+    const report = await statusOf(
+      supabaseDatabase(['USAGE on guard', 'EXECUTE on guard.before_user_created(jsonb)']),
+    );
+
+    expect(report.schema.missingAuthHookGrants).toEqual([
+      'EXECUTE on guard.is_disposable_domain(text)',
+      'EXECUTE on guard.normalize_domain(text)',
+      'SELECT on guard.blocked_domains',
+      'SELECT on guard.allowed_domains',
+    ]);
+  });
+
+  it('reports grants as unverifiable, not healthy, on a non-Supabase server', async () => {
+    // installedDatabase() has no supabase_auth_admin role, like any plain PostgreSQL
+    // instance. Asserting the grants are fine there would be a vacuous pass.
+    const report = await statusOf(installedDatabase());
+
+    expect(report.schema.authHookGrants).toBe('role-absent');
+    expect(report.schema.missingAuthHookGrants).toEqual([]);
+    // But it must not fail the health check either, or every local install breaks.
+    expect(report.schema.health).toBe('complete');
+  });
+
+  it('does not probe grants at all while guard objects are missing', async () => {
+    // has_*_privilege() raises for an unknown object, so probing a damaged schema
+    // would turn a clear "incomplete" report into a query error.
+    const report = await statusOf(damagedDatabase('guard.blocked_domains'));
+
+    expect(report.schema.authHookGrants).toBe('unknown');
+    expect(report.schema.health).toBe('incomplete');
+  });
+
+  it('reports grants as unknown rather than granted when nothing is installed', async () => {
+    const report = await statusOf(new FakeDatabase());
+
+    expect(report.schema.authHookGrants).toBe('unknown');
+    expect(report.schema.hookFunctionInstalled).toBe(false);
+  });
+});
+
+describe('printing the hook section', () => {
+  it('separates "function installed" from "activation verified"', async () => {
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusOf(supabaseDatabase()), logger);
+
+    expect(output()).toContain('Before User Created Hook');
+    expect(output()).toContain('Function installed: guard.before_user_created(jsonb)');
+    expect(output()).toContain('supabase_auth_admin can execute the hook');
+    expect(output()).toContain('Supabase activation not verified');
+  });
+
+  it('says the grants were not checked on a non-Supabase server', async () => {
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusOf(installedDatabase()), logger);
+
+    expect(output()).toContain('does not exist on this server');
+    expect(output()).not.toContain('supabase_auth_admin can execute the hook');
+  });
+
+  it('reports missing grants and does not point the operator at install', async () => {
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusOf(supabaseDatabase(['USAGE on guard'])), logger);
+
+    expect(output()).toContain('is missing EXECUTE on guard.before_user_created(jsonb)');
+    // Migration 007 is recorded as applied, so `install` will not re-issue the
+    // grants. Sending the operator there would waste their time.
+    expect(output()).toContain('007_auth_hook_permissions.sql');
+    expect(output()).toContain('applied migrations are never replayed');
+    expect(output()).not.toContain('apply the pending migrations');
+  });
+
+  it('points missing grants at the documented remediation, not at migration history', async () => {
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusOf(supabaseDatabase(['USAGE on guard'])), logger);
+
+    // The operator needs somewhere to go. The one place they must NOT be sent is
+    // the migration history -- editing it or replaying a recorded migration by hand
+    // is how a working installation gets broken further.
+    expect(output()).toContain('Repairing the auth hook grants');
+    expect(output()).not.toMatch(/re-?apply the grants from/i);
+    expect(output()).not.toMatch(/re-?run .*migration/i);
+    expect(output()).not.toMatch(/edit .*schema_migrations/i);
+  });
+
+  it('reports the hook as absent when nothing is installed', async () => {
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusOf(new FakeDatabase()), logger);
+
+    expect(output()).toContain('Before User Created Hook');
+    expect(output()).toContain('Function not installed');
+    expect(output()).toContain('Supabase activation not verified');
+  });
+});
+
 describe('printStatusReport', () => {
   it('shows the installed database layer', async () => {
     const { logger, output } = createRecordingLogger();
@@ -234,22 +409,30 @@ describe('printStatusReport', () => {
     expect(output()).toContain('guard.is_disposable_domain(text)');
   });
 
-  it('never claims the auth hook or automatic sync exists', async () => {
+  it('never claims the hook is activated, even when the function is installed', async () => {
     const { logger, output } = createRecordingLogger();
 
     const report = await runStatus({
       env: { SUPABASE_DB_URL: DB_URL },
-      connect: async () => installedDatabase(),
+      connect: async () => supabaseDatabase(),
       files: FILES,
     });
     printStatusReport(report, logger);
 
-    expect(output()).toContain('Auth Hook');
-    expect(output()).toContain('Automatic sync');
-    // Both must be reported as absent, with no wording that implies protection.
-    expect(output()).toMatch(/Auth Hook\n.*Not configured/);
+    // The function exists and the grants are in place -- the most favourable state
+    // this branch can reach -- and it still must not read as "you are protected".
+    expect(output()).toContain('Function installed: guard.before_user_created(jsonb)');
+    expect(output()).toContain('Supabase activation not verified');
+    expect(output()).not.toMatch(/hook (is )?(active|enabled|configured)\b/i);
+    expect(output()).not.toMatch(/signups? (are|is) (now )?(protected|filtered|blocked)/i);
+  });
+
+  it('still reports automatic sync as not implemented', async () => {
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusOf(installedDatabase()), logger);
+
     expect(output()).toMatch(/Automatic sync\n.*Not configured/);
-    expect(output()).not.toMatch(/hook.*(installed|active|enabled)/i);
   });
 
   it('tells the user to install when the schema is absent', async () => {
@@ -427,7 +610,7 @@ describe('status exit codes', () => {
 
       // The exit code is additional signal, not a replacement for the report.
       expect(output()).toContain('Incomplete installation');
-      expect(output()).toContain('Auth Hook');
+      expect(output()).toContain('Before User Created Hook');
       expect(process.exitCode).toBe(EXIT_CODES.guardHealth);
     });
   });
