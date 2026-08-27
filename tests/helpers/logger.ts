@@ -24,6 +24,7 @@ export function createRecordingLogger(): RecordingLogger {
     info: record,
     success: record,
     pending: record,
+    detail: record,
     warning: record,
     error: record,
   };

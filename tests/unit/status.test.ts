@@ -440,12 +440,15 @@ describe('printStatusReport', () => {
     expect(output()).not.toMatch(/signups? (are|is) (now )?(protected|filtered|blocked)/i);
   });
 
-  it('still reports automatic sync as not implemented', async () => {
+  it('reports blocklist refresh as manual, without implying a missing feature', async () => {
     const { logger, output } = createRecordingLogger();
 
     printStatusReport(await statusOf(installedDatabase()), logger);
 
-    expect(output()).toMatch(/Automatic sync\n.*Not configured/);
+    expect(output()).toMatch(/Blocklist refresh\n.*Manual only/);
+    // Scheduling is a scope decision, not an unfinished job. Wording that reads as the
+    // latter is what this assertion exists to keep out of a released status report.
+    expect(output()).not.toMatch(/not implemented|coming soon|todo/i);
   });
 
   it('tells the user to install when the schema is absent', async () => {

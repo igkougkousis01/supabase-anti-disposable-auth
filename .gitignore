@@ -15,6 +15,12 @@ coverage/
 .env.*
 !.env.example
 
+# Package artefacts -- `npm pack` output is a build product, never committed
+*.tgz
+
+# Local agent/editor settings
+.claude/settings.local.json
+
 # OS / editor noise
 .DS_Store
 *.log

@@ -37,6 +37,14 @@ describe('createLogger', () => {
     expect(stderr).toEqual([]);
   });
 
+  it('writes error details to stderr, with no symbol', () => {
+    // A hint belongs on the same stream as the error it explains.
+    logger.detail('Set SUPABASE_DB_URL and try again.');
+
+    expect(stderr).toEqual(['Set SUPABASE_DB_URL and try again.\n']);
+    expect(stdout).toEqual([]);
+  });
+
   it('writes warnings and errors to stderr', () => {
     logger.warning('careful');
     logger.error('failed');

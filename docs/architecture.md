@@ -1,14 +1,17 @@
 # Architecture
 
-> **Status:** the CLI foundation, the `guard` schema, the database policy engine, manual
-> blocklist synchronisation, the **Before User Created hook function** and **hosted hook
-> activation through the Supabase Management API** all exist today. What does **not**
-> exist is strict trigger mode and `pg_cron` scheduling. Everything marked **Planned**
-> below is not implemented.
+> **Status: 1.0.** Every layer described below is implemented — the CLI, the `guard`
+> schema and policy engine, manual blocklist synchronisation, the **Before User Created
+> hook function**, **hosted activation through the Supabase Management API**, the
+> **optional strict trigger mode**, and the `repair` / `uninstall` lifecycle.
+>
+> The one thing 1.0 does **not** include is scheduled refresh: synchronisation is
+> manual, by design, for the reasons in
+> [the roadmap](roadmap.md#why-there-is-no-scheduler-in-10).
 >
 > Installing the hook function is still not the same as switching protection on. The two
-> now have two separate commands (`install` and `hook enable`) and two separate lines in
-> `status`, and neither is ever inferred from the other.
+> have separate commands (`install` and `hook enable`) and separate lines in `status`,
+> and neither is ever inferred from the other.
 
 ## Overview
 
@@ -180,7 +183,7 @@ Current modules:
 | `src/lib/logger.ts`                 | Minimal stdout/stderr logger.                                        |
 | `src/lib/redact.ts`                 | Printable, secret-free descriptions of a database and a hook URI.    |
 
-### 2. Supabase / PostgreSQL (implemented: connectivity only)
+### 2. Supabase / PostgreSQL (connection layer)
 
 The CLI connects directly to the project database over `SUPABASE_DB_URL` using `pg`.
 There is no ORM: the tool manages database infrastructure, so plain, parameterised SQL
@@ -387,7 +390,7 @@ The practical consequence, enforced by an integration test rather than by conven
 that no function in `guard` is executable by `PUBLIC`, so a migration that forgets fails
 the build.
 
-### 4. Auth Hook (function implemented; activation manual)
+### 4. Auth Hook (function and hosted activation implemented)
 
 Supabase's **Before User Created** hook lets a PostgreSQL function inspect a signup
 before the user row is created. `guard.before_user_created(jsonb)` is that function.
@@ -658,7 +661,7 @@ how it proves it did no harm) and is deliberately out of scope for this branch.
    remediation rather than at a command that would report "up to date" and change
    nothing.
 3. **The remediation is one idempotent, role-guarded snippet** in the README
-   ([Repairing the auth hook grants](../README.md#repairing-the-auth-hook-grants)). It
+   ([Repairing the auth hook grants](auth-hook.md#repairing-the-auth-hook-grants)). It
    grants exactly the six privileges 007 grants — the `SECURITY INVOKER` call chain and
    nothing wider — is safe to run repeatedly and on a server without the role, and
    touches no migration history. Dropping the `guard` schema and reinstalling is the
@@ -1456,16 +1459,17 @@ the safe intermediate state and makes it resumable:
 Database cleanup itself is transactional. A failed explicit drop rolls the whole guard
 cleanup back. The command never claims cross-system atomicity.
 
-## Planned optional features
+## Optional and deferred features
 
-These are opt-in and explicitly **not** part of the default install:
-
-- **Strict trigger mode — implemented, off by default.** See
-  [layer 8](#8-strict-trigger-mode-implemented-opt-in-off-by-default).
-- **`pg_cron` synchronisation — not implemented.** Scheduling blocklist refreshes inside
-  the database, so the list stays current without the CLI running. Requires the extension
-  to be available and enabled in the project. Sync itself exists today, but only as a
-  manual command.
+- **Strict trigger mode — implemented, opt-in, off by default.** See
+  [layer 8](#8-strict-trigger-mode-implemented-opt-in-off-by-default). It is never
+  created by `install` or by any migration.
+- **Scheduled synchronisation — deliberately not in 1.0.** Refreshing the blocklist from
+  inside the database would mean either reimplementing the fetch pipeline's security
+  controls in SQL, where they would drift, or adding an HTTP bridge and with it a new
+  execution surface in the project's database. Neither is an acceptable trade for a
+  convenience the operator can already get from any scheduler they trust. The full
+  reasoning is in [the roadmap](roadmap.md#why-there-is-no-scheduler-in-10).
 
 ## Safety principles
 

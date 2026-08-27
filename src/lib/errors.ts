@@ -17,7 +17,15 @@ export const EXIT_CODES = {
   unexpected: 1,
   configuration: 2,
   database: 3,
-  notImplemented: 4,
+  /**
+   * Reserved. Never emitted.
+   *
+   * Held by unimplemented command stubs before 1.0. Those are gone -- every registered
+   * command is implemented -- but exit codes are part of a CLI's contract, so `4` is
+   * retired rather than reused: a script written against a pre-1.0 build must not find
+   * `4` meaning something new.
+   */
+  reserved: 4,
   /**
    * The database was reachable and answered, but the guard layer is absent or damaged.
    *

@@ -1,12 +1,12 @@
 {
   "name": "supabase-anti-disposable-auth",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "CLI that installs database-level disposable-email protection into Supabase projects.",
   "license": "MIT",
   "author": "igkougkousis01",
   "type": "module",
   "engines": {
-    "node": ">=20.12.0"
+    "node": ">=22.0.0"
   },
   "bin": {
     "supabase-anti-disposable-auth": "dist/cli.js"
@@ -23,15 +23,21 @@
   "files": [
     "dist",
     "migrations",
+    "CHANGELOG.md",
+    "LICENSE",
     "README.md",
-    "SECURITY.md",
-    "LICENSE"
+    "SECURITY.md"
   ],
   "keywords": [
     "supabase",
     "postgres",
+    "postgresql",
     "disposable-email",
+    "throwaway-email",
     "auth",
+    "authentication",
+    "signup",
+    "security",
     "cli"
   ],
   "repository": {
@@ -53,7 +59,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepack": "npm run build"
   },
   "dependencies": {
     "commander": "^15.0.0",

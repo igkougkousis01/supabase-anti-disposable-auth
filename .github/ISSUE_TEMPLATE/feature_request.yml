@@ -1,0 +1,49 @@
+name: Feature request
+description: Suggest a capability this tool does not have.
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please check
+        [the roadmap](../blob/main/docs/roadmap.md). Several things were deliberately
+        left out of 1.0 — scheduled sync, a configurable blocklist source, a `--force`
+        escape for conflicts — and each has its reasoning written down. If your request
+        is one of those, saying why the reasoning does not hold for your case is the most
+        useful thing you can write.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today? Describe the
+        situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: The behaviour you have in mind. A sample command and its output is
+        ideal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Workarounds you have used, and why they are not enough.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety
+      description: This tool installs objects into production databases and holds
+        account-wide credentials.
+      options:
+        - label: My proposal does not require overwriting or deleting objects this tool
+            did not create.
+        - label: My proposal does not require a user-supplied URL, host or SQL
+            identifier to reach the network or the database.

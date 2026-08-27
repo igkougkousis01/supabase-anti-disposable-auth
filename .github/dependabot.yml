@@ -1,0 +1,36 @@
+version: 2
+
+updates:
+  # Weekly, grouped, and minor/patch only for runtime dependencies. A major bump to
+  # `pg`, `commander` or `zod` is a decision to make deliberately in its own reviewed
+  # pull request, not something to merge because a bot opened it.
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        update-types: ['minor', 'patch']
+      production-dependencies:
+        dependency-type: production
+        update-types: ['minor', 'patch']
+    ignore:
+      # Held below the runtime floor on purpose. Typing against an older Node is what
+      # catches an accidental dependency on an API newer than the code intends to use;
+      # types older than the runtime restrict what compiles and can never break it.
+      # Move this when there is an API the project actually needs, not on a bot's clock.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ['*']
