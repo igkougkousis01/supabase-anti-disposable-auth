@@ -22,6 +22,9 @@ const LOOKUP_FUNCTION = `${GUARD_SCHEMA}.is_disposable_domain(text)`;
 /** Signature of the Supabase Before User Created hook function. */
 const HOOK_FUNCTION = `${GUARD_SCHEMA}.before_user_created(jsonb)`;
 
+/** Signature of the strict-mode trigger function. Installed by migration 008. */
+const STRICT_TRIGGER_FUNCTION = `${GUARD_SCHEMA}.enforce_auth_user_email()`;
+
 const NORMALIZE_FUNCTION = `${GUARD_SCHEMA}.normalize_domain(text)`;
 const BLOCKED_DOMAINS_TABLE = `${GUARD_SCHEMA}.blocked_domains`;
 const ALLOWED_DOMAINS_TABLE = `${GUARD_SCHEMA}.allowed_domains`;
@@ -81,6 +84,11 @@ const EXPECTED_FUNCTIONS = [
   // not an unbuilt feature. A guard layer whose hook function is gone must never
   // report as healthy: Supabase Auth would be calling a function that is not there.
   HOOK_FUNCTION,
+  // The strict trigger FUNCTION ships in migration 008 and is expected on every
+  // installation, whether or not strict mode is switched on. The optional part of
+  // strict mode is the TRIGGER on auth.users, which no migration creates and which is
+  // deliberately absent from this list -- see src/database/strict-trigger.ts.
+  STRICT_TRIGGER_FUNCTION,
 ];
 
 /**

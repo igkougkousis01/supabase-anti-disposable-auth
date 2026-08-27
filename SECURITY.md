@@ -3,8 +3,9 @@
 ## Project status
 
 This project is in early development. The CLI, the `guard` database schema, manual
-blocklist synchronisation, the **Before User Created hook function** and **hosted hook
-activation through the Supabase Management API** exist.
+blocklist synchronisation, the **Before User Created hook function**, **hosted hook
+activation through the Supabase Management API** and an **optional strict trigger mode**
+exist. Strict mode is off by default and is not a substitute for the hook.
 
 **Installing the hook function still does not switch protection on.** Supabase Auth must
 be configured to call it — by `hook enable`, the dashboard, or `config.toml`. Until that
@@ -108,6 +109,46 @@ Out of scope for activation: that a **conflict refuses rather than replacing** a
 existing hook is deliberate, not a denial of service — replacing an authentication policy
 somebody installed is an operator decision. That `--skip-db-check` allows an operator to
 activate an unverified hook is likewise documented behaviour with a warning, not a flaw.
+
+Security properties of **strict trigger mode** that are in scope:
+
+- **It stays opt-in.** Any path by which `install`, a migration, or any command other than
+  `strict enable` creates a trigger on `auth.users` is a vulnerability. The database is
+  meant to sit indefinitely with the function installed and the trigger absent.
+- **It fails closed.** A way to make a write to `auth.users` succeed while the policy
+  engine could not answer — a dropped table or function, a revoked privilege, a
+  half-removed installation — is a vulnerability. This is the property with no exception
+  handler behind it, deliberately.
+- **It cannot be made to allow a blocked domain.** Any `INSERT` or `UPDATE OF email` that
+  lands a row whose domain `guard.is_disposable_domain()` would call disposable is a
+  vulnerability. The allowlist beating the blocklist is the intended rule, not a bypass.
+- **It never destroys a trigger it did not create.** Any input, flag or remote state that
+  makes `strict enable` or `strict disable` drop, replace or alter a trigger that is not
+  the one this tool creates — including one that merely shares its name — is a
+  vulnerability. So is any way to make it read, reorder or modify an unrelated trigger on
+  `auth.users`.
+- **It accepts no identifier from the user.** Trigger, table, column and function names
+  are compiled in. Any way to influence the DDL — through a flag, an environment variable,
+  a config file, or a value read back out of the database — is a vulnerability.
+- **It cannot be turned into an escalation primitive.** The trigger function is
+  `SECURITY INVOKER` with a pinned `search_path` and no dynamic SQL. A way to make it run
+  with the owner's privileges, or to redirect what its identifiers resolve to, is a
+  vulnerability. So is any grant on it reaching `PUBLIC`, `anon` or `authenticated`.
+- **It has no side effects.** A way to make the trigger write to any table, take a lock,
+  reach the network, or recurse is a vulnerability.
+- **It leaks nothing.** The rejection message is a fixed literal. Any path that puts a
+  domain, an address, a table name, a provider or a checksum into it is a vulnerability.
+- **`status` never overstates.** Reporting strict mode as enabled when the trigger is
+  absent, disabled by hand, or pointing at another function is a vulnerability.
+
+Out of scope for strict mode: that **enabling it against a damaged guard layer stops
+writes to `auth.users`** is the documented, intended fail-closed behaviour and not a
+denial of service — `strict enable` refuses on a failed preflight, `status` reports the
+state loudly, and `strict disable` needs no guard-schema access to reverse it. That a
+**name conflict refuses rather than overwriting** is likewise deliberate. And, as with the
+hook, that a **phone-only or anonymous account with no email is not blocked** is intended:
+`auth.users.email` is nullable and this tool enforces disposable-_email_ policy only where
+an email exists.
 
 Out of scope: vulnerabilities in Supabase, PostgreSQL, or third-party dependencies.
 Report those to their respective maintainers.

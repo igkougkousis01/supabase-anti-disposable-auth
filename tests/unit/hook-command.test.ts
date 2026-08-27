@@ -83,6 +83,7 @@ const ALL_GUARD_OBJECTS = [
   'guard.is_allowed_domain(text)',
   'guard.is_disposable_domain(text)',
   'guard.before_user_created(jsonb)',
+  'guard.enforce_auth_user_email()',
 ];
 
 const AUTH_HOOK_GRANTS = [

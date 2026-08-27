@@ -44,6 +44,7 @@ The order below is forced by real dependencies, not preference:
 | `005_permissions.sql`                     | privilege revokes for `PUBLIC`, `anon`, `authenticated` |
 | `006_create_before_user_created_hook.sql` | `guard.before_user_created()` auth hook                 |
 | `007_auth_hook_permissions.sql`           | `supabase_auth_admin` grants for the hook               |
+| `008_create_strict_trigger_function.sql`  | `guard.enforce_auth_user_email()` (function only)       |
 
 `normalize_domain()` must exist before 002, because the tables' `CHECK` constraints
 call it. The lookups in 004 need the tables. The revokes in 005 use
@@ -53,6 +54,16 @@ so 005 had to run last at the time it was written.
 006 needs `guard.is_disposable_domain()` from 004, because the hook delegates its whole
 policy decision to it. 007 needs the function 006 creates, because it grants `EXECUTE`
 on it by signature.
+
+008 needs `guard.is_disposable_domain()` from 004 for the same reason 006 does: the
+strict trigger function delegates its entire policy decision to it.
+
+**008 creates a function and no trigger, on purpose.** The trigger that would attach it
+to `auth.users` is created only by `supabase-anti-disposable-auth strict enable`, never
+by a migration. `install` must never switch on a fail-closed enforcement point against a
+Supabase-managed table as a side effect of applying schema changes, so the database is
+allowed to hold a fully installed, fully inert strict layer — which is the default and
+supported state. See [Strict database enforcement](../README.md#strict-database-enforcement-optional).
 
 **006 and 007 are two files rather than one on purpose.** 006 is portable DDL that runs
 identically on any PostgreSQL server. 007 is entirely conditional on the Supabase role

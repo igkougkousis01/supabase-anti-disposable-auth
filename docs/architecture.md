@@ -28,7 +28,15 @@ guard schema
  ├── sync_metadata
  ├── normalize_domain()
  ├── is_disposable_domain()
- └── before_user_created()
+ ├── before_user_created()
+ └── enforce_auth_user_email()      strict-mode trigger function, inert by default
+```
+
+Plus, **only when an operator runs `strict enable`**, exactly one object outside `guard`:
+
+```text
+auth.users
+ └── supabase_anti_disposable_auth_strict_email   BEFORE INSERT OR UPDATE OF email
 ```
 
 Blocklist data reaches that schema through the synchronisation pipeline:
@@ -100,6 +108,41 @@ function installed        ≠        Auth Hook enabled
    (install does this)              (hook enable, the dashboard,
                                      or config.toml does this)
 ```
+
+### Two layers, one policy engine
+
+Strict mode adds a second enforcement point. It does not add a second policy:
+
+```text
+                 guard.is_disposable_domain()      the one policy engine
+                      ▲                  ▲
+        delegates to  │                  │  delegates to
+                      │                  │
+   guard.before_user_created()      guard.enforce_auth_user_email()
+                      ▲                  ▲
+                      │                  │
+             Supabase Auth        auth.users INSERT / UPDATE OF email
+        (supported primary layer)   (optional backstop, off by default)
+```
+
+The two are answered by the same function, with the same allowlist precedence and the
+same normalisation, so they can never disagree about whether a domain is disposable. What
+differs is **where** they sit and **what a rejection looks like**:
+
+|                     | Before User Created hook               | Strict trigger                      |
+| ------------------- | -------------------------------------- | ----------------------------------- |
+| Status              | supported primary layer                | optional backstop, off by default   |
+| Runs                | before the insert is attempted         | during the write, `BEFORE ... ROW`  |
+| Covers              | signup                                 | any `INSERT`, and **email changes** |
+| Rejection           | HTTP 403 + a client-renderable message | raw PostgreSQL error (`23514`)      |
+| Configured by       | the Auth service (Management API)      | one trigger in PostgreSQL           |
+| Switched on by      | `hook enable`                          | `strict enable`                     |
+| If the engine fails | rejects the signup                     | aborts the write                    |
+
+An email **change** is the case the hook structurally cannot cover: it runs at creation
+only, while Supabase Auth's `ConfirmEmailChange()` issues an `UPDATE` whose `SET` list
+contains `email`. That is the clearest reason strict mode is additive rather than
+redundant.
 
 The design principle is that enforcement lives in the database, not in the CLI. The CLI
 is an installer and an operator tool: it creates objects, inspects them, and removes
@@ -1160,16 +1203,169 @@ rejecting every signup right now, and it is the only status combination whose fi
 measured in minutes. `status` prints an explicit DANGER notice for it and points at
 `hook disable` as the fast mitigation.
 
+### 8. Strict trigger mode (implemented, opt-in, off by default)
+
+A second enforcement point at the table level, for writes that never pass through the
+Auth hook. It is **not** a replacement for the hook and is never enabled automatically.
+
+```text
+auth.users INSERT / UPDATE OF email
+        ↓
+supabase_anti_disposable_auth_strict_email     BEFORE ... FOR EACH ROW
+        ↓
+guard.enforce_auth_user_email()                lives in guard, never in auth or public
+        ↓
+guard.is_disposable_domain()                   the same one policy engine
+        ↓
+allow (return NEW)  /  raise 23514, aborting the write
+```
+
+#### Why it exists
+
+The Before User Created hook covers signup, cleanly, with a client-renderable rejection.
+Three gaps remain, and they are the whole justification for this layer:
+
+1. **Direct writes.** An operator `INSERT`, a seed script, a migration, or any client with
+   database access reaches `auth.users` without the Auth service being involved.
+2. **Email changes.** The hook runs _before user created_. Supabase Auth's
+   `ConfirmEmailChange()` issues an `UPDATE` whose `SET` list contains `email`, and no
+   creation-time hook can see it. Only a trigger is in that path.
+3. **Paths that do not exist yet.** Any future or third-party write path that does not
+   consult the configured hook.
+
+#### Why it is separated from `install`
+
+```text
+install   ≠   enable strict mode
+```
+
+Migration `008` installs `guard.enforce_auth_user_email()`. **No migration creates the
+trigger**, and no migration ever will. The database is expected to sit in the state
+"function present, trigger absent" indefinitely, and that state is healthy.
+
+Putting the trigger in a migration would mean that installing the tool silently attaches
+a fail-closed enforcement point to a Supabase-managed table — the opposite of opt-in,
+reversible and advanced. Keeping the function in a migration and the trigger in a command
+also means `strict enable` needs no migration to run, and `strict disable` leaves nothing
+half-applied.
+
+#### Fixed identity, catalog-verified
+
+One compiled-in name: `supabase_anti_disposable_auth_strict_email`. Never generated,
+never suffixed, never configurable. The only user-controlled input the `strict` commands
+accept is `--dry-run`; every identifier in the DDL is a module constant, asserted by a
+unit test.
+
+Ownership is decided from the catalog, never by string-matching `pg_get_triggerdef()`:
+
+| Catalog fact   | Expected                                     |
+| -------------- | -------------------------------------------- |
+| `tgrelid`      | `auth.users`                                 |
+| `tgname`       | `supabase_anti_disposable_auth_strict_email` |
+| `tgfoid`       | `guard.enforce_auth_user_email()`            |
+| `tgtype`       | `23` = ROW \| BEFORE \| INSERT \| UPDATE     |
+| `tgattr`       | exactly `{email}`                            |
+| `tgenabled`    | `O` (enabled for origin writes)              |
+| `tgconstraint` | `0` (not a constraint trigger)               |
+| `tgqual`       | null (no `WHEN` clause)                      |
+
+Anything else under that name is a **conflict**: reported, never repaired, never
+replaced, never dropped. There is no `DROP TRIGGER IF EXISTS` anywhere in the codebase,
+and no `--force`. Unrelated triggers — Supabase's own documented `on_auth_user_created`
+pattern, for instance — are never read, altered, reordered or removed.
+
+PostgreSQL fires same-kind triggers in alphabetical order by name. This tool does not
+attempt to control that and deliberately does not choose a name to force itself first or
+last.
+
+#### Fail-closed, deliberately
+
+`guard.enforce_auth_user_email()` has **no exception handler**. If the policy engine
+raises — dropped table, dropped function, revoked privilege, half-removed installation —
+the error propagates and the write aborts. This is achieved by writing less code, not
+more, and it is the same decision `guard.before_user_created()` makes for the same reason:
+a policy engine that cannot answer has not said "allow".
+
+The availability trade-off is real and is documented rather than engineered away: a
+damaged guard layer with strict mode on stops writes to `auth.users`. Three things keep
+that survivable:
+
+- strict mode is **optional**, so the default deployment cannot reach this state;
+- `status` reports it loudly and exits `5`;
+- `strict disable` performs **no guard-health preflight** — one catalog read and one
+  `DROP TRIGGER` — so the exit stays open when the guard schema is the thing that is
+  broken, or gone entirely.
+
+#### `SECURITY INVOKER`, and why not `DEFINER`
+
+Supabase's general advice for `auth.users` triggers is `SECURITY DEFINER`, because the
+problem it addresses is that `supabase_auth_admin` has no privileges outside `auth`. That
+problem does not exist here: migration `007` already grants that role the exact chain this
+function needs. `DEFINER` was considered and refused on two grounds:
+
+- it would run the function as the guard owner on **every** write to `auth.users`, which
+  is a privilege boundary crossed to avoid permission work that is already done;
+- it would **weaken the fail-closed guarantee**. Under `INVOKER`, a writer that cannot
+  reach the policy engine is stopped by a permission error. Under `DEFINER`, that same
+  writer would proceed on the owner's privileges and a revoked grant would stop being
+  observable at all.
+
+The `guard` schema therefore remains entirely free of `SECURITY DEFINER`, which an
+integration test asserts.
+
+**No grant is issued for the trigger function, to any role.** PostgreSQL checks `EXECUTE`
+on a trigger function when the trigger is _created_, not when it _fires_ — verified
+empirically, and asserted by an integration test that confirms `supabase_auth_admin` holds
+no `EXECUTE` on it while its writes still hit the trigger. Creating and dropping the
+trigger is an operator action performed by the role behind `SUPABASE_DB_URL`.
+
+#### Missing-email behaviour
+
+`auth.users.email` is nullable in Supabase's own schema (`email varchar(255) NULL`), and
+Supabase Auth maps an absent address to SQL `NULL`, so phone-only, anonymous and
+SSO-without-email accounts carry no email at all. `NULL`, empty and whitespace all
+**allow**. This is a deliberate fail-open for the _absence of an email_, and it is the
+same distinction the hook draws: "there is nothing to check" and "the check did not work"
+are different events.
+
+#### Preflight
+
+`strict enable` verifies all of the following before it issues any DDL, and refuses with
+exit `5` naming what is wrong:
+
+1. the database is reachable;
+2. `auth.users` exists;
+3. it has an `email` column, and that column holds text — the shape is verified rather
+   than assumed, because Supabase says its managed objects may change at any time;
+4. the guard layer is healthy;
+5. `guard.enforce_auth_user_email()` is installed;
+6. the connected role holds `USAGE` on `auth` and `TRIGGER` on `auth.users`;
+7. no conflicting trigger exists under our name.
+
+`--dry-run` runs the same preflight and the same conflict check, prints the plan, and
+executes zero DDL. Both mutations prove their result by reading the catalog back
+afterwards: a statement that did not raise is not a state that exists.
+
+#### Performance
+
+The hot path is `NEW.email` → `guard.is_disposable_domain()` → at most two primary-key
+lookups. No HTTP, no provider fetch, no sequential scan, no logging table, no new index.
+
+Measured on PostgreSQL 14 against a 120,000-domain blocklist: **~26 µs per row** added to
+an insert, with `EXPLAIN` confirming an Index Only Scan on `blocked_domains_pkey` and ~6
+shared buffer hits per evaluation. No additional index is justified — every lookup is an
+exact equality match on the normalised primary key.
+
 ## Planned optional features
 
 These are opt-in and explicitly **not** part of the default install:
 
-- **Strict trigger mode.** A PostgreSQL trigger enforcing the same rule at the table
-  level, for defence in depth when a signup path bypasses the hook. Stricter, but harder
-  to reason about and riskier to install; therefore optional.
-- **`pg_cron` synchronisation.** Scheduling blocklist refreshes inside the database, so
-  the list stays current without the CLI running. Requires the extension to be available
-  and enabled in the project. Sync itself exists today, but only as a manual command.
+- **Strict trigger mode — implemented, off by default.** See
+  [layer 8](#8-strict-trigger-mode-implemented-opt-in-off-by-default).
+- **`pg_cron` synchronisation — not implemented.** Scheduling blocklist refreshes inside
+  the database, so the list stays current without the CLI running. Requires the extension
+  to be available and enabled in the project. Sync itself exists today, but only as a
+  manual command.
 
 ## Safety principles
 
@@ -1177,8 +1373,12 @@ These are opt-in and explicitly **not** part of the default install:
    `uninstall`.
 2. **Explicit.** Destructive or state-changing commands will support a dry run that
    prints the exact SQL first.
-3. **Non-invasive.** `auth.users` is never modified, and application schemas are never
-   touched.
+3. **Non-invasive, with one opt-in exception.** Application schemas are never touched and
+   nothing is ever created inside `auth` — no table, no function, no type. The single
+   exception is strict mode, which creates **one trigger** on `auth.users` and only when
+   an operator explicitly runs `strict enable`. No migration creates it, `install` never
+   creates it, and `strict disable` removes it. No function in `guard` reads or writes
+   `auth.users` in any mode.
 4. **Secret-safe.** Connection strings are never logged, written to disk, or passed as
    process arguments; all values in SQL are bound parameters.
 5. **Honest.** `status` reports unbuilt features as not configured rather than omitting
@@ -1279,25 +1479,49 @@ combination earns its own table.
 | **Believing you are protected when you are not**                | `status` reports activation as **not checked** without credentials — never a tick inferred from the function existing — and reports a failed check as a failure rather than downgrading it. The only output that claims protection is the one branch where an active hook and a healthy guard layer were both actually observed. Unit tests assert no other output reads as an activation claim.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **Believing you are fine while signups are failing**            | The combination of an active hook and a broken guard layer is a distinct, loudly-reported state with an explicit DANGER notice and a pointer to `hook disable`, rather than two separate lines an operator has to combine themselves.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
+## Strict trigger threat model
+
+Strict mode is the only part of this tool that creates an object outside `guard`, and the
+only part whose failure mode is "writes stop" rather than "writes are not filtered". Both
+facts drive the table below.
+
+| Concern                                                                                                                                                                                   | Mitigation                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Direct database write bypass** — a write reaches `auth.users` without passing through the Before User Created hook policy (operator `INSERT`, seed script, migration, third-party path) | The optional `BEFORE INSERT OR UPDATE OF email` trigger, delegating to the same `guard.is_disposable_domain()` the hook uses. Opt-in, because it is a backstop rather than the supported layer.                                                                                                                                                                                                                            |
+| **Email change bypass** — a user changes an accepted address to a disposable one                                                                                                          | Covered by `UPDATE OF email`. Structurally out of reach for the hook, which runs at creation only.                                                                                                                                                                                                                                                                                                                         |
+| **The trigger breaks signups** — the policy engine it calls is damaged                                                                                                                    | The write **fails closed** — that is the intended behaviour, not the risk. The risk is availability, and it is answered by: strict mode being optional and off by default; `status` reporting `enabled + damaged` loudly with exit `5`; `strict enable` refusing on a preflight failure; `--dry-run`; and `strict disable` needing no guard-schema access at all, so the rollback path survives the failure it exists for. |
+| **Silent policy bypass through error handling**                                                                                                                                           | There is no `exception when others then return new`, and no equivalent. A policy engine that raises aborts the write. Integration tests damage the layer four different ways — dropped function, dropped table, revoked `EXECUTE`, revoked schema `USAGE` — and assert the write fails every time.                                                                                                                         |
+| **Existing trigger collision** — a trigger already exists under our name                                                                                                                  | Fixed compiled-in identity; ownership decided from `pg_trigger` / `pg_proc` / `pg_attribute` rather than by parsing `pg_get_triggerdef()`; an unexpected configuration is a **conflict** with its own exit code (`10`) and is never overwritten, repaired or dropped. No `DROP TRIGGER IF EXISTS` exists in the codebase.                                                                                                  |
+| **Collateral damage to unrelated triggers**                                                                                                                                               | Only the trigger under our fixed name is ever read or modified. Supabase's own documented `on_auth_user_created` pattern is untouched, and an integration test proves it survives an enable/disable cycle. Firing order is never manipulated.                                                                                                                                                                              |
+| **Trigger silently disabled by hand**                                                                                                                                                     | `tgenabled <> 'O'` is reported as a conflict, not as "enabled". Claiming enforcement that is switched off would be the worst possible lie for this layer, and re-enabling it automatically would overwrite a deliberate decision.                                                                                                                                                                                          |
+| **Managed schema evolution** — Supabase changes `auth.users`                                                                                                                              | Footprint is one trigger and nothing else in `auth`; the function lives in `guard`; the `email` column's existence and type are verified before any DDL; the supported hook remains the primary layer, so strict mode can be abandoned without losing protection. Documented as advanced and optional for this reason.                                                                                                     |
+| **Privilege escalation through the trigger function**                                                                                                                                     | `SECURITY INVOKER`, `search_path = ''`, fully-qualified identifiers, no dynamic SQL, no `PUBLIC` `EXECUTE`. No grant is issued to any role, because PostgreSQL checks `EXECUTE` on a trigger function at creation and not at firing time. `DEFINER` is refused explicitly — it would also weaken the fail-closed property.                                                                                                 |
+| **Injection through DDL identifiers**                                                                                                                                                     | Trigger, table, column and function names are compiled-in constants; the only user-controlled CLI input is `--dry-run`. A unit test asserts the exact `CREATE`/`DROP` statements.                                                                                                                                                                                                                                          |
+| **Information disclosure through the rejection**                                                                                                                                          | The exception message is a compile-time literal naming no domain, address, table, list, provider or checksum. The blocklist cannot be enumerated through it any more precisely than through the write itself.                                                                                                                                                                                                              |
+| **Recursion or side effects in the write path**                                                                                                                                           | The function evaluates and returns `NEW`. It writes to nothing, makes no network call, touches no Management API, and cannot recurse. Asserted by test and by the absence of any statement against a table in its body.                                                                                                                                                                                                    |
+| **Breaking phone-only and anonymous auth**                                                                                                                                                | `NULL`, empty and whitespace emails all allow, matching Supabase's nullable `email` column and its `NULL`-for-absent storage. Covered by live-database tests.                                                                                                                                                                                                                                                              |
+| **An operator believing strict mode replaces the hook**                                                                                                                                   | Every surface says otherwise: `strict enable`'s success output, `strict status`'s closing note, the command description, the README and this document. `status` reports the two layers separately and never infers one from the other.                                                                                                                                                                                     |
+
 ## Database threat model
 
 Concerns specific to the database layer, and what answers each one.
 
-| Concern                                               | Mitigation                                                                                                                                                                                                                                                                                                    |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Malicious domain strings                              | Input reaches SQL only as a bound parameter, and `normalize_domain()` uses no dynamic SQL. A value like `x'); drop table ...--@evil.com` normalises to `evil.com` — inert text. Length is capped before any regex runs.                                                                                       |
-| Case-variant duplicate domains                        | Normalising `CHECK` constraint plus the primary key. Case variants cannot coexist as rows.                                                                                                                                                                                                                    |
-| Altered historical migration files                    | SHA-256 recorded at apply time and re-checked on every run. A mismatch fails the run; the altered file is never re-executed and never silently accepted.                                                                                                                                                      |
-| Deleted or renamed applied migrations                 | Both rejected during planning, before anything executes.                                                                                                                                                                                                                                                      |
-| Out-of-order migrations                               | A new file numbered below an applied one is rejected rather than run out of sequence.                                                                                                                                                                                                                         |
-| Accidental public write grants                        | Explicit revokes for `PUBLIC`, `anon` and `authenticated`, with the schema `USAGE` revoke as the containing gate. Asserted by integration tests using `has_schema_privilege()` / `has_table_privilege()` / `has_function_privilege()`, which resolve inherited privileges that ACL string parsing would miss. |
-| A future migration adding a world-executable function | `ALTER DEFAULT PRIVILEGES` cannot prevent this (see above), so an integration test asserts no function in `guard` is `PUBLIC`-executable. A migration that omits the revoke fails the build.                                                                                                                  |
-| Falsely reporting a damaged install as healthy        | `status` probes every expected table and function individually instead of trusting the migration history, and reports `Incomplete installation` when any is absent.                                                                                                                                           |
-| The tool altering privileges outside `guard`          | No role-global `ALTER DEFAULT PRIVILEGES` is issued. An integration test asserts `pg_default_acl` holds no role-global row.                                                                                                                                                                                   |
-| Broken allowlist precedence                           | Precedence is a single unconditional early return, covered by unit and live-database tests including the both-lists case, and re-tested through the auth hook.                                                                                                                                                |
-| A migration widening `supabase_auth_admin`'s reach    | Grants name each object individually rather than using `ON ALL TABLES IN SCHEMA`, so a future table is not handed over by accident. Integration tests assert the role has no write privilege on any policy table and no access to `sync_metadata` or `schema_migrations`.                                     |
-| `status` reporting a hook the auth role cannot run    | Grants are probed with `has_*_privilege()` and a missing one makes the installation `incomplete` with exit code `5`, so the breakage is caught before an operator activates the hook.                                                                                                                         |
-| Migration partial failure                             | Each migration and its history row share one transaction. A failed migration leaves no row, so a re-run resumes from the last success.                                                                                                                                                                        |
-| Concurrent installs                                   | Session advisory lock; the second run fails fast instead of interleaving DDL.                                                                                                                                                                                                                                 |
-| Credential leakage in logs                            | Connection strings never printed — only `host:port/database` via `describeConnectionTarget()`. Asserted in tests for both `install` and `status`.                                                                                                                                                             |
-| Elevated function privileges                          | No `SECURITY DEFINER`; every function pins `search_path = ''`.                                                                                                                                                                                                                                                |
+| Concern                                                  | Mitigation                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Malicious domain strings                                 | Input reaches SQL only as a bound parameter, and `normalize_domain()` uses no dynamic SQL. A value like `x'); drop table ...--@evil.com` normalises to `evil.com` — inert text. Length is capped before any regex runs.                                                                                       |
+| Case-variant duplicate domains                           | Normalising `CHECK` constraint plus the primary key. Case variants cannot coexist as rows.                                                                                                                                                                                                                    |
+| Altered historical migration files                       | SHA-256 recorded at apply time and re-checked on every run. A mismatch fails the run; the altered file is never re-executed and never silently accepted.                                                                                                                                                      |
+| Deleted or renamed applied migrations                    | Both rejected during planning, before anything executes.                                                                                                                                                                                                                                                      |
+| Out-of-order migrations                                  | A new file numbered below an applied one is rejected rather than run out of sequence.                                                                                                                                                                                                                         |
+| Accidental public write grants                           | Explicit revokes for `PUBLIC`, `anon` and `authenticated`, with the schema `USAGE` revoke as the containing gate. Asserted by integration tests using `has_schema_privilege()` / `has_table_privilege()` / `has_function_privilege()`, which resolve inherited privileges that ACL string parsing would miss. |
+| A future migration adding a world-executable function    | `ALTER DEFAULT PRIVILEGES` cannot prevent this (see above), so an integration test asserts no function in `guard` is `PUBLIC`-executable. A migration that omits the revoke fails the build.                                                                                                                  |
+| Falsely reporting a damaged install as healthy           | `status` probes every expected table and function individually instead of trusting the migration history, and reports `Incomplete installation` when any is absent.                                                                                                                                           |
+| The tool altering privileges outside `guard`             | No role-global `ALTER DEFAULT PRIVILEGES` is issued. An integration test asserts `pg_default_acl` holds no role-global row.                                                                                                                                                                                   |
+| Broken allowlist precedence                              | Precedence is a single unconditional early return, covered by unit and live-database tests including the both-lists case, and re-tested through the auth hook.                                                                                                                                                |
+| A migration widening `supabase_auth_admin`'s reach       | Grants name each object individually rather than using `ON ALL TABLES IN SCHEMA`, so a future table is not handed over by accident. Integration tests assert the role has no write privilege on any policy table and no access to `sync_metadata` or `schema_migrations`.                                     |
+| `status` reporting a hook the auth role cannot run       | Grants are probed with `has_*_privilege()` and a missing one makes the installation `incomplete` with exit code `5`, so the breakage is caught before an operator activates the hook.                                                                                                                         |
+| Migration partial failure                                | Each migration and its history row share one transaction. A failed migration leaves no row, so a re-run resumes from the last success.                                                                                                                                                                        |
+| Concurrent installs                                      | Session advisory lock; the second run fails fast instead of interleaving DDL.                                                                                                                                                                                                                                 |
+| Credential leakage in logs                               | Connection strings never printed — only `host:port/database` via `describeConnectionTarget()`. Asserted in tests for both `install` and `status`.                                                                                                                                                             |
+| A migration silently attaching a trigger to `auth.users` | No migration creates a trigger. Migration `008` installs a function only, and the trigger is created exclusively by `strict enable`. An integration test asserts a fresh migration run leaves `auth.users` with no trigger of ours.                                                                           |
+| Elevated function privileges                             | No `SECURITY DEFINER`; every function pins `search_path = ''`.                                                                                                                                                                                                                                                |

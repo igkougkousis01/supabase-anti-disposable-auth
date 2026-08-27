@@ -31,6 +31,7 @@ import {
   runMigrations,
 } from '../../src/database/migrations.js';
 import { statusExitCode } from '../../src/commands/status.js';
+import { statusReportFor } from '../helpers/status.js';
 import { readGuardSchemaStatus } from '../../src/database/schema-status.js';
 import type { MigrationFile } from '../../src/database/migration-types.js';
 import type { DatabaseConnection } from '../../src/database/types.js';
@@ -493,13 +494,7 @@ describeIfConfigured('guard schema against a live database', () => {
     it('exits zero only while the installation is complete', async () => {
       const status = await readGuardSchemaStatus(connection);
 
-      expect(
-        statusExitCode({
-          target: connection.target,
-          schema: status,
-          remote: { kind: 'not-checked' },
-        }),
-      ).toBe(EXIT_CODES.success);
+      expect(statusExitCode(await statusReportFor(connection, status))).toBe(EXIT_CODES.success);
     });
 
     it('exits with the guard-health code against a really damaged schema', async () => {
@@ -509,13 +504,9 @@ describeIfConfigured('guard schema against a live database', () => {
 
         const status = await readGuardSchemaStatus(connection);
 
-        expect(
-          statusExitCode({
-            target: connection.target,
-            schema: status,
-            remote: { kind: 'not-checked' },
-          }),
-        ).toBe(EXIT_CODES.guardHealth);
+        expect(statusExitCode(await statusReportFor(connection, status))).toBe(
+          EXIT_CODES.guardHealth,
+        );
       } finally {
         await connection.execute('rollback');
       }

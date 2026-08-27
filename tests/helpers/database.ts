@@ -29,9 +29,41 @@ export interface FakeDatabaseOptions {
    *
    * Anything not listed is reported as not granted, so a test that forgets to grant
    * something sees it reported as missing rather than silently passing.
+   *
+   * Two-argument `has_*_privilege(object, privilege)` calls, which PostgreSQL answers
+   * for the session user, are looked up under the key `current_user`.
    */
   readonly privileges?: Record<string, string[]>;
+  /**
+   * The row `pg_trigger` should return for the strict trigger.
+   *
+   * Absent means no trigger of ours exists, which is the default and the state every
+   * pre-strict test expects.
+   */
+  readonly strictTrigger?: Record<string, unknown>;
+  /** The row the `auth.users.email` column probe should return. */
+  readonly authUsersEmailColumn?: { type_name: string; category: string };
+  /** Whether the `auth` schema exists. Defaults to whether `auth.users` is present. */
+  readonly authSchemaPresent?: boolean;
 }
+
+/**
+ * The catalog row a correctly created strict trigger produces.
+ *
+ * Mirrors the aliases `readStrictTriggerState()` selects, so a test that changes one
+ * field is changing exactly the fact it means to change.
+ */
+export const OUR_STRICT_TRIGGER_ROW: Record<string, unknown> = {
+  tgtype: 23,
+  tgenabled: 'O',
+  is_constraint: false,
+  has_when: false,
+  function_schema: 'guard',
+  function_name: 'enforce_auth_user_email',
+  columns: ['email'],
+  definition:
+    'CREATE TRIGGER supabase_anti_disposable_auth_strict_email BEFORE INSERT OR UPDATE OF email ON auth.users FOR EACH ROW EXECUTE FUNCTION guard.enforce_auth_user_email()',
+};
 
 export class FakeDatabase implements DatabaseConnection {
   readonly target = 'db.example.test:5432/postgres';
@@ -51,6 +83,14 @@ export class FakeDatabase implements DatabaseConnection {
   private readonly options: FakeDatabaseOptions;
   private readonly presentObjects: Set<string>;
   private readonly roles: Set<string>;
+  /**
+   * The strict trigger, as the catalog would report it.
+   *
+   * Mutable, and updated by `CREATE TRIGGER` / `DROP TRIGGER`, so the post-write
+   * verification read in `strict enable` / `strict disable` sees what the statement
+   * actually did instead of a frozen fixture that would make verification vacuous.
+   */
+  private strictTrigger: Record<string, unknown> | undefined;
   /** Rows written inside the current transaction, discarded on rollback. */
   private staged: AppliedMigration[] = [];
   /** Schema state as of the last commit, restored on rollback. */
@@ -62,6 +102,7 @@ export class FakeDatabase implements DatabaseConnection {
     this.committedSchemaPresent = this.schemaPresent;
     this.presentObjects = new Set(options.presentObjects ?? []);
     this.roles = new Set(options.roles ?? []);
+    this.strictTrigger = options.strictTrigger;
   }
 
   /** Seeds history as if these migrations had already been applied. */
@@ -110,6 +151,14 @@ export class FakeDatabase implements DatabaseConnection {
       this.schemaPresent = true;
       this.presentObjects.add('guard.schema_migrations');
     }
+
+    if (sql.startsWith('create trigger supabase_anti_disposable_auth_strict_email')) {
+      this.strictTrigger = { ...OUR_STRICT_TRIGGER_ROW };
+    }
+
+    if (sql.startsWith('drop trigger supabase_anti_disposable_auth_strict_email')) {
+      this.strictTrigger = undefined;
+    }
   }
 
   async query<Row extends Record<string, unknown>>(
@@ -137,8 +186,26 @@ export class FakeDatabase implements DatabaseConnection {
       return [{ pg_advisory_unlock: true }];
     }
 
+    // Checked before the generic pg_namespace branch below: the strict-trigger and
+    // column probes join through pg_namespace and would otherwise be answered as if
+    // they were schema-existence checks.
+    if (sql.includes('pg_trigger')) {
+      return this.strictTrigger === undefined ? [] : [this.strictTrigger];
+    }
+
+    if (sql.includes('pg_attribute')) {
+      const column = this.options.authUsersEmailColumn;
+      return column === undefined ? [] : [{ ...column }];
+    }
+
     if (sql.includes('pg_namespace')) {
-      return [{ present: this.schemaPresent && parameters[0] === 'guard' }];
+      const schema = String(parameters[0]);
+      if (schema === 'auth') {
+        return [
+          { present: this.options.authSchemaPresent ?? this.presentObjects.has('auth.users') },
+        ];
+      }
+      return [{ present: this.schemaPresent && schema === 'guard' }];
     }
 
     if (sql.includes('pg_roles')) {
@@ -148,7 +215,11 @@ export class FakeDatabase implements DatabaseConnection {
     // has_schema_privilege / has_function_privilege / has_table_privilege all take
     // (role, object, privilege) and are answered from the same grant table.
     if (sql.includes('_privilege(')) {
-      const [role, object, privilege] = parameters.map(String);
+      const values = parameters.map(String);
+      // PostgreSQL's two-argument form asks about the session user. Model it under a
+      // fixed key rather than dropping the probe, so a test can grant it.
+      const [role, object, privilege] =
+        values.length >= 3 ? values : ['current_user', values[0], values[1]];
       const held = this.options.privileges?.[role ?? ''] ?? [];
       return [{ present: held.includes(`${privilege} on ${object}`) }];
     }
