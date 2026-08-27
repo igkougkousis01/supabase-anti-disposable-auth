@@ -2,8 +2,8 @@
 
 A Node.js CLI that installs database-level disposable-email protection into Supabase
 projects. Instead of validating throwaway addresses in your application code, the tool
-will push enforcement down into PostgreSQL and Supabase Auth, so every signup path —
-your app, another client, or the dashboard — is covered by the same rule.
+will push enforcement down into PostgreSQL and Supabase Auth, so every signup path -
+your app, another client, or the dashboard is covered by the same rule.
 
 ## Project status: early development
 
