@@ -18,7 +18,7 @@ actually pushed — dates are never written ahead of time.
 
 Nothing yet.
 
-## [1.0.0] — unreleased
+## [1.0.0] — 2026-08-27
 
 First stable release. Nothing to upgrade from: earlier `0.x` builds were never published
 to npm, so there is no migration path to document.
