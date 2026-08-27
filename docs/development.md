@@ -74,16 +74,16 @@ live upstream dataset.
 unless the relevant variable is set, which keeps `npm test` and CI offline by default.
 CI never requires Supabase credentials.
 
-There are three, and the distinction between the variables matters:
+There are four, and the distinction between the variables matters:
 
 | Variable           | Used by                  | Effect on the database                                                            |
 | ------------------ | ------------------------ | --------------------------------------------------------------------------------- |
 | `SUPABASE_DB_URL`  | `database.test.ts`       | Read-only: connects and reads `server_version`.                                   |
 | `SADA_TEST_DB_URL` | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                     |
 | `SADA_TEST_DB_URL` | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly. |
+| `SADA_TEST_DB_URL` | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.   |
 
-> **⚠️ `guard-schema.test.ts` and `blocklist-sync.test.ts` run
-> `drop schema if exists guard cascade`.**
+> **⚠️ These three run `drop schema if exists guard cascade`.**
 > They create the schema from scratch, exercise it, and drop it again. Nothing outside
 > `guard` is read or written — `public` and `auth` are never touched — but any data you
 > had in `guard` is destroyed.
@@ -109,7 +109,53 @@ one database and one `guard` schema. Running them in parallel would have them dr
 schema out from under each other and contend on the migration advisory lock.
 
 The sync integration tests use a local fixture provider, never the real upstream, so
-`npm run test:integration` makes no network request either.
+`npm run test:integration` makes no network request either. The auth-hook tests contact
+no Supabase project and start no Supabase stack — they exercise the database function
+directly, exactly as Supabase Auth would.
+
+#### Auth-hook tests and Supabase roles
+
+`auth-hook.test.ts` includes the checks that matter most for the hook: executing it as
+`supabase_auth_admin`, and asserting the privilege boundaries around it. Those need
+Supabase's roles, which a plain PostgreSQL server does not have.
+
+**They skip explicitly when a role is absent** rather than looping zero times and
+reporting a pass. A vacuous assertion is worse than a skip: it claims coverage the run
+did not have.
+
+To make them run locally, create the role once on your scratch server:
+
+```bash
+psql -d supabase_anti_disposable_auth_test -c "create role supabase_auth_admin nologin"
+```
+
+Then re-run the suite; the eleven role-dependent tests change from `↓` to `✓`.
+
+Note that **roles are cluster-wide, not database-scoped**. This is the one piece of
+setup that reaches outside the scratch database, which is why it is a documented manual
+step and not something the suite does to you. `nologin` and no grants of its own make it
+inert. To remove it afterwards:
+
+```bash
+psql -d supabase_anti_disposable_auth_test -c "drop schema if exists guard cascade" \
+  -c "drop owned by supabase_auth_admin" -c "drop role supabase_auth_admin"
+```
+
+`anon` and `authenticated` work the same way: create them to exercise the client-role
+boundary tests, or let those tests skip.
+
+CI does not create these roles, so CI runs the portable subset. Verify the role-based
+tests locally before landing a change to the hook or its permissions.
+
+#### Damaging the schema on purpose
+
+The fail-closed tests need a genuinely broken policy layer — a dropped lookup function,
+a dropped table, a revoked privilege. Every one of them does its damage inside a
+transaction that is rolled back in a `finally`, so the damage is real while the
+assertion runs and gone the moment it ends.
+
+Do not weaken the schema permanently to make one of these easier to write. If a test
+needs a broken database, it should break it and put it back.
 
 Fixture data is small, deterministic and inserted inside transactions that are rolled
 back, so the tests leave no rows behind:
@@ -182,7 +228,22 @@ the two that bite hardest:
   grants `EXECUTE` to `PUBLIC` on every new function, and `ALTER DEFAULT PRIVILEGES`
   cannot prevent that at schema scope, so end such a migration with
   `revoke all privileges on all functions in schema guard from public;`. An integration
-  test fails the build if you forget.
+  test fails the build if you forget. `006_create_before_user_created_hook.sql` is the
+  live example.
+- **A migration that grants to a Supabase role must guard the grant.**
+  `supabase_auth_admin`, `anon` and `authenticated` do not exist on a plain PostgreSQL
+  server, so wrap the statements in
+  `if exists (select 1 from pg_catalog.pg_roles where rolname = '...')`, as 005 and 007
+  do. The `EXECUTE` strings inside such a block must stay compile-time constants — never
+  interpolate an identifier from a query result.
+
+  Know what that guard costs you: it is evaluated **once**, when the migration is
+  applied, and a migration that took the no-op branch is still recorded as applied and
+  is never replayed. If the role appears later, the grants do not. Cover the gap in
+  `status` — probe the live catalog, never the migration history — and document an
+  idempotent remediation rather than teaching anyone to replay the file. See
+  [migrations/README.md](../migrations/README.md) →
+  _Conditional migrations are applied once, condition and all_.
 
 ### Bootstrap infrastructure
 

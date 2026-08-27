@@ -1,10 +1,16 @@
 /**
  * `install` — creates the database guard layer.
  *
- * Scope in this branch is strictly the database policy engine: connect, run the
- * bundled migrations, report what changed, disconnect. It does NOT configure Supabase
- * Auth, register the Before User Created hook, touch `auth.users`, enable `pg_cron`, or
- * download anything. Those arrive in later branches and are listed in docs/roadmap.md.
+ * Scope is strictly the database layer: connect, run the bundled migrations, report
+ * what changed, disconnect. The migrations now include the Before User Created hook
+ * FUNCTION and its grants -- but `install` still does NOT configure Supabase Auth to
+ * call it, touch `auth.users`, enable `pg_cron`, or download anything. Registering the
+ * hook with Supabase arrives in a later branch (docs/roadmap.md).
+ *
+ * That distinction is the whole reason the closing summary is worded the way it is.
+ * Creating the function is not the same as switching the protection on, and telling a
+ * user they are protected when they are not is the single worst thing this tool could
+ * do.
  *
  * Running it twice is safe and is the expected way to upgrade: already-applied
  * migrations are skipped, and only genuinely new ones execute.
@@ -92,11 +98,33 @@ export function printInstallSummary(report: InstallReport, logger: Logger = defa
   // printing a summary under an empty list of changes.
   if (report.applied.length === 0) {
     logger.success('Database guard layer already up to date.');
+    printActivationNotice(logger);
     return;
   }
 
   logger.blank();
   logger.plain('Database guard layer installed.');
+  printActivationNotice(logger);
+}
+
+/**
+ * States the one thing `install` cannot do for the user.
+ *
+ * `install` creates `guard.before_user_created()` and grants `supabase_auth_admin`
+ * permission to run it. It does not tell Supabase Auth to call it -- that lives in
+ * the Auth service's configuration, not in PostgreSQL, and this branch deliberately
+ * does not automate it.
+ *
+ * So the notice is printed on every successful run, including a no-op one. An
+ * operator who runs `install` twice and sees the reassuring line only the first time
+ * would reasonably conclude the second run confirmed they were protected.
+ */
+function printActivationNotice(logger: Logger): void {
+  logger.blank();
+  logger.plain('Supabase Auth activation is still required — signups are not filtered yet.');
+  logger.plain('Enable the Before User Created hook pointing at:');
+  logger.plain('  pg-functions://postgres/guard/before_user_created');
+  logger.plain('See the README for local config.toml and hosted dashboard steps.');
 }
 
 export function registerInstallCommand(program: Command, logger: Logger = defaultLogger): Command {
