@@ -5,11 +5,13 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](#requirements)
 =======
+
 A Node.js CLI that installs database-level disposable-email protection into Supabase
 projects. Instead of validating throwaway addresses in your application code, the tool
 will push enforcement down into PostgreSQL and Supabase Auth, so every signup path -
 your app, another client, or the dashboard is covered by the same rule.
->>>>>>> origin/main
+
+> > > > > > > origin/main
 
 A Node.js CLI that installs **database-level disposable-email protection** into a
 Supabase project. Instead of checking throwaway addresses in your application code, it
