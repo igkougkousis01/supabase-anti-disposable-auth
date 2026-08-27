@@ -16,7 +16,7 @@ import {
   EXIT_CODES,
 } from '../../src/lib/errors.js';
 import type { ManagementClient } from '../../src/supabase/management-client.js';
-import { FakeDatabase } from '../helpers/database.js';
+import { FakeDatabase, OUR_STRICT_TRIGGER_ROW } from '../helpers/database.js';
 import { createRecordingLogger } from '../helpers/logger.js';
 import {
   authConfigResponse,
@@ -58,6 +58,7 @@ const ALL_GUARD_OBJECTS = [
   'guard.is_allowed_domain(text)',
   'guard.is_disposable_domain(text)',
   'guard.before_user_created(jsonb)',
+  'guard.enforce_auth_user_email()',
 ];
 
 const ROW_COUNTS = { 'guard.blocked_domains': 3, 'guard.allowed_domains': 1 };
@@ -865,6 +866,99 @@ describe('status — the dangerous combination', () => {
       client: api.client,
     });
 
+    expect(statusExitCode(report)).toBe(EXIT_CODES.guardHealth);
+  });
+});
+
+describe('the strict enforcement section', () => {
+  const REMOTE_ENV = {
+    SUPABASE_DB_URL: DB_URL,
+    SUPABASE_PROJECT_REF: TEST_PROJECT_REF,
+    SUPABASE_ACCESS_TOKEN: SENTINEL_TOKEN,
+  };
+
+  /** A Supabase-shaped database where strict mode could be switched on. */
+  function strictReady(overrides: Record<string, unknown> = {}): FakeDatabase {
+    return new FakeDatabase({
+      presentObjects: [...ALL_GUARD_OBJECTS, 'auth.users'],
+      rowCounts: ROW_COUNTS,
+      authUsersEmailColumn: { type_name: 'character varying(255)', category: 'S' },
+      privileges: { current_user: ['USAGE on auth', 'TRIGGER on auth.users'] },
+      ...overrides,
+    }).seedHistory(FULL_HISTORY);
+  }
+
+  it('prints strict mode as an optional, hollow line when it is off', async () => {
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusOf(strictReady()), logger);
+
+    expect(output()).toContain('Strict database enforcement');
+    expect(output()).toContain('Disabled (optional)');
+  });
+
+  it('keeps a healthy database with strict mode off at exit code 0', async () => {
+    // The supported v1 deployment is: guard layer healthy + hook active + strict off.
+    // Making that non-zero would turn every default install into a failing check.
+    const report = await statusOf(strictReady());
+
+    expect(report.strict.mode).toBe('disabled');
+    expect(report.schema.health).toBe('complete');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.success);
+  });
+
+  it('reports strict mode as enabled without changing the exit code', async () => {
+    const report = await statusOf(strictReady({ strictTrigger: OUR_STRICT_TRIGGER_ROW }));
+
+    expect(report.strict.mode).toBe('enabled');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.success);
+  });
+
+  it('does not make a plain PostgreSQL database look unhealthy', async () => {
+    // installedDatabase() has no auth.users, like any local development server.
+    const report = await statusOf(installedDatabase());
+
+    expect(report.strict.mode).toBe('unavailable');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.success);
+  });
+
+  it('exits with the strict conflict code when the trigger name is taken', async () => {
+    const report = await statusOf(
+      strictReady({
+        strictTrigger: { ...OUR_STRICT_TRIGGER_ROW, function_name: 'someone_elses_function' },
+      }),
+    );
+
+    expect(statusExitCode(report)).toBe(EXIT_CODES.strictConflict);
+  });
+
+  it('ranks a hook conflict above a strict conflict', async () => {
+    // Both need a human. The hook decides whether signups are filtered at all, so it is
+    // the one the operator should be sent to first.
+    const api = managementApiDouble([authConfigResponse(foreign(true))]);
+
+    const report = await runStatus({
+      env: REMOTE_ENV,
+      connect: async () =>
+        strictReady({ strictTrigger: { ...OUR_STRICT_TRIGGER_ROW, function_name: 'other' } }),
+      files: FILES,
+      client: api.client,
+    });
+
+    expect(statusExitCode(report)).toBe(EXIT_CODES.hookConflict);
+  });
+
+  it('treats strict mode enabled over a damaged guard layer as a health failure', async () => {
+    const present = ALL_GUARD_OBJECTS.filter((object) => object !== 'guard.blocked_domains');
+    const report = await statusOf(
+      strictReady({
+        presentObjects: [...present, 'auth.users'],
+        rowCounts: {},
+        strictTrigger: OUR_STRICT_TRIGGER_ROW,
+      }),
+    );
+
+    expect(report.strict.mode).toBe('broken');
     expect(statusExitCode(report)).toBe(EXIT_CODES.guardHealth);
   });
 });

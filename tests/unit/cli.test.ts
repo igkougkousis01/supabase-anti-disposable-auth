@@ -5,10 +5,18 @@ import { describe, expect, it } from 'vitest';
 import { buildProgram } from '../../src/cli.js';
 import { getPackageVersion } from '../../src/lib/package-info.js';
 
-const EXPECTED_COMMANDS = ['doctor', 'hook', 'install', 'status', 'sync', 'uninstall'];
+const EXPECTED_COMMANDS = ['doctor', 'hook', 'install', 'status', 'strict', 'sync', 'uninstall'];
 
 /** Subcommands of `hook`. Registered as a group so later hook operations have a home. */
 const EXPECTED_HOOK_SUBCOMMANDS = ['status', 'enable', 'disable'];
+
+/**
+ * Subcommands of `strict`.
+ *
+ * A group rather than a bare `trigger` verb: the name has to say that this is an
+ * advanced enforcement mode, not just a database object being toggled.
+ */
+const EXPECTED_STRICT_SUBCOMMANDS = ['status', 'enable', 'disable'];
 
 describe('buildProgram', () => {
   it('registers every planned command exactly once', () => {
@@ -40,6 +48,23 @@ describe('buildProgram', () => {
     expect(hook?.commands.map((command) => command.name()).sort()).toEqual(
       [...EXPECTED_HOOK_SUBCOMMANDS].sort(),
     );
+  });
+
+  it('registers the strict subcommands', () => {
+    const strict = buildProgram().commands.find((command) => command.name() === 'strict');
+
+    expect(strict).toBeDefined();
+    expect(strict?.commands.map((command) => command.name()).sort()).toEqual(
+      [...EXPECTED_STRICT_SUBCOMMANDS].sort(),
+    );
+  });
+
+  it('gives every strict subcommand a description', () => {
+    const strict = buildProgram().commands.find((command) => command.name() === 'strict');
+
+    for (const command of strict?.commands ?? []) {
+      expect(command.description()).not.toBe('');
+    }
   });
 
   it('gives every hook subcommand a description', () => {

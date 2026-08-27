@@ -36,6 +36,7 @@ import { createPostgresConnection } from '../../src/database/client.js';
 import { runMigrations } from '../../src/database/migrations.js';
 import { readGuardSchemaStatus } from '../../src/database/schema-status.js';
 import { statusExitCode } from '../../src/commands/status.js';
+import { statusReportFor } from '../helpers/status.js';
 import type { DatabaseConnection } from '../../src/database/types.js';
 import { EXIT_CODES } from '../../src/lib/errors.js';
 
@@ -65,6 +66,16 @@ let authRolePresent = false;
 let clientRoles: string[] = [];
 
 type HookResponse = Record<string, unknown>;
+
+/**
+ * Removes SQL comments so an assertion matches code rather than prose.
+ *
+ * Both forms, because `pg_get_functiondef()` returns the body verbatim and this
+ * schema's bodies are heavily commented on purpose.
+ */
+function stripSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+}
 
 async function roleExists(role: string): Promise<boolean> {
   const result = await connection.query<{ present: boolean }>(
@@ -719,20 +730,36 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
       ).toBe(before);
     });
 
-    it('never touches auth.users', async () => {
-      // The tool's standing guarantee. Asserted here because the hook is the first
-      // component that runs inside an auth flow at all.
-      const references = await connection.query<{ definition: string }>(
-        `select pg_catalog.pg_get_functiondef(p.oid) as definition
+    it('never reads or writes auth.users from any guard function', async () => {
+      // The tool's standing guarantee, restated for the branch that added strict mode.
+      //
+      // Strict mode attaches ONE trigger to auth.users, and that is the whole extent of
+      // this tool's reach into the managed schema. No function inside `guard` may issue
+      // a statement against it: guard.enforce_auth_user_email() is handed NEW by
+      // PostgreSQL and evaluates it, and everything else -- the hook included -- has no
+      // business there at all.
+      //
+      // Comments are stripped before matching, because guard.enforce_auth_user_email()
+      // explains its own purpose in prose and prose is not a table reference.
+      const references = await connection.query<{ name: string; definition: string }>(
+        `select p.proname as name, pg_catalog.pg_get_functiondef(p.oid) as definition
          from pg_catalog.pg_proc p
          join pg_catalog.pg_namespace n on n.oid = p.pronamespace
          where n.nspname = 'guard'`,
       );
 
+      expect(references.rows.length).toBeGreaterThan(0);
       for (const row of references.rows) {
-        expect(row.definition).not.toMatch(/\bauth\.users\b/);
-        expect(row.definition).not.toMatch(/\bauth\./);
+        expect(stripSqlComments(row.definition)).not.toMatch(/\bauth\./);
       }
+    });
+
+    it('keeps the hook itself free of the word auth entirely', async () => {
+      const definition = await scalar<string>(
+        `select pg_catalog.pg_get_functiondef('guard.before_user_created(jsonb)'::regprocedure) as value`,
+      );
+
+      expect(definition).not.toMatch(/\bauth\./);
     });
 
     it('makes no remote call and reads no extension', async () => {
@@ -1077,13 +1104,7 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
       expect(status.hookFunctionInstalled).toBe(true);
       expect(status.health).toBe('complete');
       expect(status.missingObjects).toEqual([]);
-      expect(
-        statusExitCode({
-          target: connection.target,
-          schema: status,
-          remote: { kind: 'not-checked' },
-        }),
-      ).toBe(EXIT_CODES.success);
+      expect(statusExitCode(await statusReportFor(connection, status))).toBe(EXIT_CODES.success);
     });
 
     it('reports the grants honestly for this server', async () => {
@@ -1114,13 +1135,9 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         // The migration history still claims 006 was applied, which is why object
         // probing cannot be replaced by trusting the history.
         expect(status.pending).toEqual([]);
-        expect(
-          statusExitCode({
-            target: connection.target,
-            schema: status,
-            remote: { kind: 'not-checked' },
-          }),
-        ).toBe(EXIT_CODES.guardHealth);
+        expect(statusExitCode(await statusReportFor(connection, status))).toBe(
+          EXIT_CODES.guardHealth,
+        );
       } finally {
         await connection.execute('rollback');
       }
@@ -1141,13 +1158,9 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         // it, `status` would call a hook that rejects every signup "healthy".
         expect(status.missingObjects).toEqual([]);
         expect(status.health).toBe('incomplete');
-        expect(
-          statusExitCode({
-            target: connection.target,
-            schema: status,
-            remote: { kind: 'not-checked' },
-          }),
-        ).toBe(EXIT_CODES.guardHealth);
+        expect(statusExitCode(await statusReportFor(connection, status))).toBe(
+          EXIT_CODES.guardHealth,
+        );
       } finally {
         await connection.execute('rollback');
       }
@@ -1206,13 +1219,9 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         ]);
 
         expect(status.health).toBe('incomplete');
-        expect(
-          statusExitCode({
-            target: connection.target,
-            schema: status,
-            remote: { kind: 'not-checked' },
-          }),
-        ).toBe(EXIT_CODES.guardHealth);
+        expect(statusExitCode(await statusReportFor(connection, status))).toBe(
+          EXIT_CODES.guardHealth,
+        );
       });
     });
 
@@ -1230,13 +1239,9 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
         expect(repaired.authHookGrants).toBe('granted');
         expect(repaired.missingAuthHookGrants).toEqual([]);
         expect(repaired.health).toBe('complete');
-        expect(
-          statusExitCode({
-            target: connection.target,
-            schema: repaired,
-            remote: { kind: 'not-checked' },
-          }),
-        ).toBe(EXIT_CODES.success);
+        expect(statusExitCode(await statusReportFor(connection, repaired))).toBe(
+          EXIT_CODES.success,
+        );
       });
     });
 

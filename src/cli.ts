@@ -15,6 +15,7 @@ import { registerDoctorCommand } from './commands/doctor.js';
 import { registerHookCommand } from './commands/hook.js';
 import { registerInstallCommand } from './commands/install.js';
 import { registerStatusCommand } from './commands/status.js';
+import { registerStrictCommand } from './commands/strict.js';
 import { registerSyncCommand } from './commands/sync.js';
 import { registerUninstallCommand } from './commands/uninstall.js';
 import { loadEnvFileIfPresent } from './config/env.js';
@@ -37,6 +38,7 @@ export function buildProgram(logger: Logger = defaultLogger): Command {
   registerHookCommand(program, logger);
   registerInstallCommand(program, logger);
   registerStatusCommand(program, logger);
+  registerStrictCommand(program, logger);
   registerSyncCommand(program, logger);
   registerUninstallCommand(program);
 

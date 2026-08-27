@@ -107,20 +107,36 @@ live upstream dataset.
 unless the relevant variable is set, which keeps `npm test` and CI offline by default.
 CI never requires Supabase credentials.
 
-There are five, and the distinction between the variables matters:
+There are six, and the distinction between the variables matters:
 
-| Variable                                                             | Used by                  | Effect                                                                              |
-| -------------------------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------- |
-| `SUPABASE_DB_URL`                                                    | `database.test.ts`       | Read-only: connects and reads `server_version`.                                     |
-| `SADA_TEST_DB_URL`                                                   | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                       |
-| `SADA_TEST_DB_URL`                                                   | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly.   |
-| `SADA_TEST_DB_URL`                                                   | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.     |
-| `SADA_TEST_SUPABASE_PROJECT_REF` + `SADA_TEST_SUPABASE_ACCESS_TOKEN` | `management-api.test.ts` | **Read-only**: one `GET` of a hosted project's Auth configuration. Changes nothing. |
+| Variable                                                             | Used by                  | Effect                                                                                     |
+| -------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------ |
+| `SUPABASE_DB_URL`                                                    | `database.test.ts`       | Read-only: connects and reads `server_version`.                                            |
+| `SADA_TEST_DB_URL`                                                   | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                              |
+| `SADA_TEST_DB_URL`                                                   | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly.          |
+| `SADA_TEST_DB_URL`                                                   | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.            |
+| `SADA_TEST_DB_URL`                                                   | `strict-trigger.test.ts` | **Destructive**: drops and recreates `guard` **and a synthetic `auth` schema it creates**. |
+| `SADA_TEST_SUPABASE_PROJECT_REF` + `SADA_TEST_SUPABASE_ACCESS_TOKEN` | `management-api.test.ts` | **Read-only**: one `GET` of a hosted project's Auth configuration. Changes nothing.        |
 
-> **⚠️ These three run `drop schema if exists guard cascade`.**
-> They create the schema from scratch, exercise it, and drop it again. Nothing outside
-> `guard` is read or written — `public` and `auth` are never touched — but any data you
-> had in `guard` is destroyed.
+> **⚠️ These four run `drop schema if exists guard cascade`.**
+> They create the schema from scratch, exercise it, and drop it again. Any data you had in
+> `guard` is destroyed.
+>
+> **⚠️ `strict-trigger.test.ts` additionally creates and drops an `auth` schema.**
+> Strict mode is a trigger on `auth.users`, so testing it needs one. The suite builds a
+> **minimal synthetic fixture** — `id`, `email varchar(255) null`, `phone`,
+> `raw_user_meta_data`, `is_anonymous` — and drops it afterwards.
+>
+> It refuses to touch an `auth` schema it did not create: the fixture is stamped with a
+> marker comment, and an unmarked `auth` schema **aborts the run with an explicit error**
+> rather than being dropped. Failing loudly is deliberate — a developer who pointed this at
+> a real project must not see a quiet skip and assume the tests passed.
+>
+> **This fixture is not Supabase.** It validates PostgreSQL trigger semantics — firing
+> rules, the `UPDATE OF` column filter, fail-closed behaviour, catalog shape, privilege
+> behaviour — against the real engine. It does not validate Supabase Auth, GoTrue's write
+> paths, or the real managed `auth` schema, and nothing in it should be read as claiming
+> otherwise.
 
 That is exactly why they do **not** reuse `SUPABASE_DB_URL`: a developer's
 `SUPABASE_DB_URL` usually points at a real Supabase project, and `npm run
@@ -137,6 +153,28 @@ SADA_TEST_DB_URL="postgresql://localhost:5432/supabase_anti_disposable_auth_test
 
 Never point `SADA_TEST_DB_URL` at production, and never at a Supabase project you care
 about.
+
+#### Supabase-specific roles
+
+The tests that matter most in `auth-hook.test.ts` and `strict-trigger.test.ts` — executing
+the policy path as `supabase_auth_admin`, and proving fail-closed behaviour under a role
+that is not the schema owner — need a role a plain PostgreSQL server does not have. They
+**skip explicitly** when it is absent rather than running as the owner, whose implicit
+privileges hide exactly the failures those tests exist to catch.
+
+To run them, create the role once on your scratch server:
+
+```bash
+psql -d supabase_anti_disposable_auth_test -c "create role supabase_auth_admin nologin"
+```
+
+and drop it when you are done. Roles are cluster-wide, which is why this is a documented
+manual step and not something the suite does to you.
+
+The strict-mode fixture grants that role ordinary `INSERT`/`UPDATE`/`SELECT` on the
+synthetic `auth.users`. On hosted Supabase the role **owns** the table instead. That
+difference is a known limitation of the fixture, documented rather than papered over by
+weakening the role.
 
 Integration test files run **serially** (`--no-file-parallelism`), because they share
 one database and one `guard` schema. Running them in parallel would have them drop the
@@ -275,6 +313,12 @@ npm run lint
 npm run format:check
 npm test
 npm run build
+```
+
+Plus, locally, against a scratch database:
+
+```bash
+SADA_TEST_DB_URL="postgresql://localhost:5432/supabase_anti_disposable_auth_test" npm run test:integration
 ```
 
 CI needs **no Supabase credentials of any kind** — no database URL and no Management API
@@ -420,6 +464,44 @@ Three rules that are easy to break and expensive to get wrong:
 Try the whole flow against a scratch database and a fake API without touching a real
 project: inject a `ManagementClient` built over your own `fetch` double, exactly as
 `tests/unit/hook-command.test.ts` does.
+
+## Working on strict trigger mode
+
+The code lives in `src/database/strict-trigger.ts` and `src/commands/strict.ts`, split the
+same way the hook code is: catalog facts in one module, orchestration in the other.
+
+| Module                       | Knows about                                            | Does not know about          |
+| ---------------------------- | ------------------------------------------------------ | ---------------------------- |
+| `database/strict-trigger.ts` | the fixed identity, the DDL, the catalog, the verdicts | commands, output, exit codes |
+| `commands/strict.ts`         | orchestration, preflight, output, exit codes           | catalog details              |
+
+Five rules that are easy to break and expensive to get wrong:
+
+- **No migration may ever create the trigger.** `install` ≠ `strict enable`, and that
+  separation is the whole opt-in property. Migration `008` installs a function; the
+  trigger comes from a command an operator ran on purpose.
+- **Never `DROP TRIGGER IF EXISTS`, and never drop-then-recreate.** Ownership is
+  established from the catalog first. A trigger under our name that is not ours is a
+  conflict, and a conflict is reported — never resolved by destroying it. There is no
+  `--force` and there should not be one.
+- **Never decide from `pg_get_triggerdef()`.** It is captured as diagnostic output for the
+  operator to read. Decisions come from `tgfoid`, `tgtype`, `tgattr`, `tgenabled`,
+  `tgconstraint` and `tgqual`, because string matching is how a tool gets fooled by
+  whitespace, a quoted identifier, or a future PostgreSQL that renders the same trigger
+  differently.
+- **Never add an exception handler to `guard.enforce_auth_user_email()`.** The fail-closed
+  guarantee is achieved by _not_ catching, and `when others then return new` would convert
+  a broken policy engine into a silent bypass. Four integration tests damage the layer in
+  four different ways and assert the write fails every time; if you add a handler, they
+  will tell you.
+- **`strict disable` must never require a healthy guard schema.** It is the command an
+  operator reaches for when the fail-closed trigger is rejecting every write, which is
+  precisely when their guard layer is the problem.
+
+Identifiers in the DDL are compiled-in constants and a unit test asserts the exact
+`CREATE`/`DROP` statements. The only user-controlled input either command accepts is
+`--dry-run`, and `--dry-run` must execute zero DDL — asserted in both the unit and the
+integration suites.
 
 ## Conventions
 

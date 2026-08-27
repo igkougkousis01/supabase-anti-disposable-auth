@@ -30,6 +30,8 @@ import { createPostgresConnection } from '../database/client.js';
 import { AUTH_HOOK_ROLE, readGuardSchemaStatus } from '../database/schema-status.js';
 import type { GuardSchemaStatus } from '../database/schema-status.js';
 import type { MigrationFile } from '../database/migration-types.js';
+import { readStrictModeStatus } from '../database/strict-trigger.js';
+import type { StrictModeStatus } from '../database/strict-trigger.js';
 import type { DatabaseConnection, DatabaseConnectionConfig } from '../database/types.js';
 import { EXIT_CODES, toAppError } from '../lib/errors.js';
 import type { AppError, ExitCode } from '../lib/errors.js';
@@ -40,6 +42,7 @@ import { describeHookUri } from '../lib/redact.js';
 import { getBeforeUserCreatedHookState } from '../supabase/auth-config.js';
 import { BEFORE_USER_CREATED_HOOK_URI } from '../supabase/constants.js';
 import { ManagementClient } from '../supabase/management-client.js';
+import { printStrictSection, strictModeExitCode } from './strict.js';
 import type { BeforeUserCreatedHookState } from '../supabase/types.js';
 
 export interface StatusDependencies {
@@ -76,6 +79,15 @@ export interface StatusReport {
   readonly target: string;
   readonly schema: GuardSchemaStatus;
   readonly remote: RemoteActivation;
+  /**
+   * The optional trigger backstop.
+   *
+   * Reported separately from {@link GuardSchemaStatus} because it is not part of the
+   * installation's health: strict mode being off is the default, supported state and
+   * must never make a project look unhealthy. Only strict mode being ON while the layer
+   * it calls is damaged is a problem, and that is a different verdict entirely.
+   */
+  readonly strict: StrictModeStatus;
 }
 
 export async function runStatus(
@@ -90,9 +102,16 @@ export async function runStatus(
   const connection = await connect({ connectionString: databaseUrl });
 
   let schema: GuardSchemaStatus;
+  let strict: StrictModeStatus;
   try {
     schema = await readGuardSchemaStatus(connection, {
       ...(dependencies.files === undefined ? {} : { files: dependencies.files }),
+    });
+    // Read on the same connection, from the same catalog snapshot the schema probe saw.
+    // `guardHealthy` is passed in rather than re-derived so there is exactly one health
+    // verdict in the report and the two sections cannot contradict each other.
+    strict = await readStrictModeStatus(connection, {
+      guardHealthy: schema.health === 'complete',
     });
   } finally {
     await connection.close().catch(() => undefined);
@@ -101,6 +120,7 @@ export async function runStatus(
   return {
     target: connection.target,
     schema,
+    strict,
     remote: await readRemoteActivation(dependencies, config.projectRef, config.accessToken),
   };
 }
@@ -332,6 +352,10 @@ function printHookAndSyncSections(logger: Logger, report: StatusReport): void {
   logger.plain('Before User Created Hook');
   printHookSection(logger, report);
   logger.blank();
+  // Optional by design, and printed with a hollow marker when off. A healthy v1
+  // deployment is: guard layer healthy + hook active + strict mode disabled.
+  printStrictSection(report.strict, logger);
+  logger.blank();
   logger.plain('Automatic sync');
   logger.pending('Not configured (not implemented yet)');
 }
@@ -426,9 +450,11 @@ function printHookGrants(logger: Logger, schema: GuardSchemaStatus): void {
  *  2. **`8` hook conflict** — a definite remote finding that needs a human decision.
  *  3. **`7` remote failure** — we were asked to check and could not. Least certain, so
  *     last.
- *  4. **`0`** — including a healthy database whose hook is simply not activated. That is
- *     a documented, deliberate state, not a failure, and making it non-zero would break
- *     every existing database-only health check.
+ *  4. **`10` strict trigger conflict** — a definite database finding that needs a human
+ *     decision, ranked below the hook conflict because the hook is the primary layer.
+ *  5. **`0`** — including a healthy database whose hook is simply not activated, and one
+ *     whose strict mode is off. Both are documented, deliberate states, not failures,
+ *     and making either non-zero would break every existing health check.
  *
  * Configuration and database-connection failures never reach this function: they are
  * thrown and keep their own codes via the CLI's top-level handler.
@@ -437,13 +463,29 @@ export function statusExitCode(report: StatusReport): ExitCode {
   if (report.schema.health !== 'complete') {
     return EXIT_CODES.guardHealth;
   }
+  // Enabled-but-broken strict mode is a definite database failure and outranks any
+  // remote finding, exactly as a damaged guard schema does. In practice a `broken`
+  // verdict implies an incomplete schema and the rule above has already fired, but this
+  // does not depend on that: the two verdicts are computed independently and must stay
+  // independently enforced.
+  if (report.strict.mode === 'broken') {
+    return EXIT_CODES.guardHealth;
+  }
   if (report.remote.kind === 'conflict') {
     return EXIT_CODES.hookConflict;
+  }
+  // After the hook conflict, because the hook is the primary layer: when both slots are
+  // contested, the one that decides whether signups are filtered at all is the one the
+  // operator should be sent to first.
+  if (report.strict.mode === 'conflict') {
+    return EXIT_CODES.strictConflict;
   }
   if (report.remote.kind === 'failed') {
     return EXIT_CODES.remote;
   }
-  return EXIT_CODES.success;
+  // Reached by `disabled` and `unavailable` strict modes, both of which are healthy,
+  // supported states. Strict mode is optional and its absence is never a failure.
+  return strictModeExitCode(report.strict.mode);
 }
 
 export function registerStatusCommand(

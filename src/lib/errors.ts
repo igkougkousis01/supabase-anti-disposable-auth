@@ -73,6 +73,20 @@ export const EXIT_CODES = {
    * successful and the operator must inspect the project before trusting it.
    */
   hookVerification: 9,
+  /**
+   * The strict-mode trigger name on `auth.users` is taken by something else.
+   *
+   * Its own code for the same reason `hookConflict` has one, and separate from it
+   * because the two name different objects with different owners and different
+   * remediations: `8` is Supabase Auth's Before User Created slot, reachable only
+   * through the Management API; `10` is a PostgreSQL trigger, and the operator fixes it
+   * with SQL. A CI job that routes both to a human still needs to tell them apart in
+   * order to say which system to look at.
+   *
+   * Never produced by a healthy database with strict mode simply switched off -- that
+   * is the default state and exits `0`.
+   */
+  strictConflict: 10,
 } as const;
 
 export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
@@ -219,6 +233,23 @@ export class AuthHookConflictError extends AppError {
 export class AuthHookVerificationError extends AppError {
   readonly kind = 'remote' as const;
   readonly exitCode = EXIT_CODES.hookVerification;
+}
+
+/**
+ * A trigger named for strict mode exists on `auth.users` and is not the one we create.
+ *
+ * Thrown instead of dropping or replacing it. The name is fixed and compiled in, so a
+ * collision means somebody deliberately created a trigger under it -- and a
+ * `DROP TRIGGER IF EXISTS` followed by a recreate, the obvious-looking fix, is precisely
+ * how that trigger would be destroyed without anybody being asked.
+ *
+ * Kept apart from {@link GuardHealthError} because nothing here is broken. The database
+ * is in a state the tool refuses to resolve on its own initiative, and the resolution is
+ * a decision only the operator can make.
+ */
+export class StrictTriggerConflictError extends AppError {
+  readonly kind = 'database' as const;
+  readonly exitCode = EXIT_CODES.strictConflict;
 }
 
 /** A bug, or an error we did not anticipate. Diagnostics are allowed here. */

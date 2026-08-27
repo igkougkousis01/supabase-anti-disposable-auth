@@ -108,6 +108,23 @@ export {
   type StatusReport,
 } from './commands/status.js';
 export {
+  printStrictMutationReport,
+  printStrictSection,
+  printStrictStatusReport,
+  runStrictDisable,
+  runStrictEnable,
+  runStrictStatus,
+  strictModeExitCode,
+  strictStatusExitCode,
+  STRICT_SECTION_TITLE,
+  type StrictCommandOptions,
+  type StrictDependencies,
+  type StrictEvents,
+  type StrictIntent,
+  type StrictMutationReport,
+  type StrictStatusReport,
+} from './commands/strict.js';
+export {
   isSupportedNodeVersion,
   loadConfig,
   loadEnvFileIfPresent,
@@ -142,6 +159,28 @@ export type {
   MigrationState,
 } from './database/migration-types.js';
 export { readGuardSchemaStatus, type GuardSchemaStatus } from './database/schema-status.js';
+export {
+  createStrictTrigger,
+  dropStrictTrigger,
+  readAuthUsersCompatibility,
+  readStrictModeStatus,
+  readStrictTriggerState,
+  AUTH_SCHEMA,
+  AUTH_USERS_EMAIL_COLUMN,
+  AUTH_USERS_RELATION,
+  AUTH_USERS_TABLE,
+  CREATE_STRICT_TRIGGER_SQL,
+  DROP_STRICT_TRIGGER_SQL,
+  EXPECTED_TRIGGER_TYPE,
+  STRICT_TRIGGER_FUNCTION,
+  STRICT_TRIGGER_FUNCTION_NAME,
+  STRICT_TRIGGER_NAME,
+  type AuthUsersCompatibility,
+  type ReadStrictModeStatusOptions,
+  type StrictMode,
+  type StrictModeStatus,
+  type StrictTriggerState,
+} from './database/strict-trigger.js';
 export { inTransaction } from './database/transaction.js';
 export type {
   DatabaseConnection,
@@ -164,6 +203,7 @@ export {
   GuardHealthError,
   isAppError,
   MigrationError,
+  StrictTriggerConflictError,
   SupabaseApiError,
   SuspiciousUpdateError,
   SyncError,

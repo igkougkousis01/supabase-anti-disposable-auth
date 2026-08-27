@@ -121,11 +121,56 @@ Deliberately deferred from this branch, and the reason:
 - **`uninstall`.** The correct removal order (disable remotely, then drop the database
   objects) is documented and `hook disable` now makes the first half a single command.
 
-## v0.5 — Strict trigger mode (opt-in)
+## v0.5 — Strict trigger mode (opt-in) — **Done**
 
-- Optional trigger-level enforcement for defence in depth
-- Off by default; enabled explicitly with a flag
-- Documented trade-offs and rollback path
+- `migrations/008_create_strict_trigger_function.sql` installs
+  `guard.enforce_auth_user_email()` — a **function only**. No migration creates a
+  trigger, so `install` can never switch strict mode on as a side effect
+- `strict enable` / `strict disable` / `strict status`, each with `--dry-run` that runs
+  the full preflight and executes **zero DDL**
+- One fixed, compiled-in trigger identity,
+  `supabase_anti_disposable_auth_strict_email`, as
+  `BEFORE INSERT OR UPDATE OF email ON auth.users FOR EACH ROW`
+- `UPDATE OF email` coverage, which the Before User Created hook structurally cannot
+  provide: the hook runs at creation only, while GoTrue's `ConfirmEmailChange()` issues an
+  `UPDATE` whose `SET` list contains `email`
+- Policy fully delegated to `guard.is_disposable_domain()` — no blocklist, allowlist or
+  normalisation logic is duplicated in the trigger
+- Explicit missing-email behaviour: `NULL`, empty and whitespace all **allow**, so
+  phone-only, anonymous and SSO-without-email accounts are never collateral damage
+- **Fails closed** with no exception handler at all: a damaged policy layer aborts the
+  write rather than admitting it. The availability trade-off is documented prominently
+- `SECURITY INVOKER` with **no new grant to any role** — PostgreSQL checks `EXECUTE` on a
+  trigger function at trigger-creation time, not at firing time, which an integration test
+  asserts. `SECURITY DEFINER` refused explicitly: it would also weaken the fail-closed
+  property
+- Ownership established from the catalog (`tgfoid`, `tgtype`, `tgattr`, `tgenabled`,
+  `tgconstraint`, `tgqual`), never by string-matching `pg_get_triggerdef()`. An unexpected
+  trigger under our name is a **conflict** — exit code `10` — and is never overwritten,
+  repaired or dropped. There is no `DROP TRIGGER IF EXISTS` in the codebase
+- Unrelated triggers on `auth.users` are never read, altered, reordered or removed
+- `status` reports strict mode as its own section; **disabled is healthy and exits `0`**,
+  enabled-but-broken exits `5`, a name conflict exits `10`
+- Post-write verification: both mutations read the catalog back before reporting success
+- Live-PostgreSQL tests over a synthetic `auth.users` fixture covering insert, uppercase,
+  allowlist override, `NULL`/blank email, email update, non-firing on unrelated updates,
+  four separate fail-closed paths, execution under `SET ROLE supabase_auth_admin`,
+  conflict refusal, idempotency and unrelated-trigger survival
+
+Deliberately deferred from this branch, and the reason:
+
+- **`uninstall`.** The full removal ordering — strict disable, hook disable, then drop the
+  objects — is documented, and `strict disable` makes the first step a single command. A
+  complete `uninstall` remains v0.8.
+- **A `--force` escape for trigger conflicts.** There is no safe default for "destroy the
+  trigger somebody else created under this name", and offering one would make the
+  dangerous path a flag away.
+- **Controlling trigger firing order.** PostgreSQL orders same-kind triggers
+  alphabetically. Renaming ours to force a position would be reaching into a project's
+  other triggers, which this tool does not do; the behaviour is documented instead.
+- **A real local Supabase stack in the test suite.** The fixture validates PostgreSQL
+  trigger semantics, not Supabase Auth. That limitation is stated in the suite's own
+  header rather than glossed over.
 
 ## v0.6 — `pg_cron` synchronisation (opt-in)
 
