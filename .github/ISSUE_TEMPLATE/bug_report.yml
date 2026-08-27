@@ -1,0 +1,108 @@
+name: Bug report
+description: Something behaves differently from how it is documented.
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report.
+
+        > ### ⚠️ Never paste credentials into a public issue
+        >
+        > Not a `SUPABASE_DB_URL`, not a `SUPABASE_ACCESS_TOKEN`, not a service-role key,
+        > not a JWT, not a database password. Redact them — `postgresql://...@host/db` is
+        > enough for anyone to help you.
+        >
+        > **Found a security vulnerability instead?** Do not open an issue at all.
+        > Follow [SECURITY.md](../blob/main/SECURITY.md), which uses GitHub's private
+        > vulnerability reporting.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran, with any secrets redacted.
+      render: shell
+      placeholder: supabase-anti-disposable-auth hook enable --dry-run
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: |
+        The CLI's output, **with credentials removed**. If it is not obvious what went
+        wrong, rerun with `--debug` — diagnostics are redacted, but read them before you
+        paste them.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: exit-code
+    attributes:
+      label: Exit code
+      description: 'From `echo $?` immediately after the command. See the exit-code table in the README.'
+      placeholder: '7'
+
+  - type: input
+    id: cli-version
+    attributes:
+      label: CLI version
+      description: Output of `supabase-anti-disposable-auth --version`.
+      placeholder: 1.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      description: Output of `node --version`.
+      placeholder: v22.11.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Database environment
+      options:
+        - Hosted Supabase project
+        - Local Supabase stack (supabase start)
+        - Plain PostgreSQL
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: postgres-version
+    attributes:
+      label: PostgreSQL version
+      description: 'From `select version()`, or the major version if that is all you have.'
+      placeholder: '15.6'
+
+  - type: textarea
+    id: status
+    attributes:
+      label: '`status` output'
+      description: |
+        Optional but usually decisive: `supabase-anti-disposable-auth status`. It never
+        prints credentials — databases appear as `host:port/database`.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Whatever you think matters — other triggers on `auth.users`, an
+        existing Before User Created hook, an unusual migration history.

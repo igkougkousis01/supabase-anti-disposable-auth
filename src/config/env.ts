@@ -22,8 +22,17 @@ import { CLI_NAME } from '../lib/package-info.js';
 import { PROJECT_REF_LENGTH, PROJECT_REF_PATTERN } from '../supabase/constants.js';
 import type { AppConfig, ManagementCredentials, NodeVersionRequirement } from './types.js';
 
-/** Matches the `engines.node` constraint in package.json. */
-export const MINIMUM_NODE_VERSION: NodeVersionRequirement = { major: 20, minor: 12, patch: 0 };
+/**
+ * Matches the `engines.node` constraint in package.json.
+ *
+ * 22.0.0 is a support decision, not an API constraint: the implementation happens to
+ * run on 20.12 and newer, because `process.loadEnvFile` landed in 20.12.0. But Node 20
+ * reached end of life in April 2026, and a stable release must not write an unsupported
+ * runtime into its compatibility contract just because the code would execute there.
+ * Supporting a version means keeping it working, and this one receives no security
+ * fixes upstream.
+ */
+export const MINIMUM_NODE_VERSION: NodeVersionRequirement = { major: 22, minor: 0, patch: 0 };
 
 export const MINIMUM_NODE_VERSION_LABEL = `${MINIMUM_NODE_VERSION.major}.${MINIMUM_NODE_VERSION.minor}.${MINIMUM_NODE_VERSION.patch}`;
 

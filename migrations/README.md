@@ -63,7 +63,7 @@ to `auth.users` is created only by `supabase-anti-disposable-auth strict enable`
 by a migration. `install` must never switch on a fail-closed enforcement point against a
 Supabase-managed table as a side effect of applying schema changes, so the database is
 allowed to hold a fully installed, fully inert strict layer — which is the default and
-supported state. See [Strict database enforcement](../README.md#strict-database-enforcement-optional).
+supported state. See [Strict database enforcement](../docs/strict-mode.md).
 
 **006 and 007 are two files rather than one on purpose.** 006 is portable DDL that runs
 identically on any PostgreSQL server. 007 is entirely conditional on the Supabase role

@@ -93,6 +93,47 @@ describe('buildProgram', () => {
     expect(help).toContain('--version');
   });
 
+  it('shows the first-run workflow, and that installing is not enabling', () => {
+    // `helpInformation()` does not render `addHelpText`, so capture what a user sees.
+    let rendered = '';
+    const program = buildProgram();
+    program.configureOutput({
+      writeOut: (text) => {
+        rendered += text;
+      },
+    });
+    program.outputHelp();
+
+    expect(rendered).toMatch(/doctor/);
+    expect(rendered).toMatch(/hook enable/);
+    // The whole point of the footer: the ordering, and that `install` alone filters
+    // nothing.
+    expect(rendered).toMatch(/signups are filtered from here/i);
+    expect(rendered).toMatch(/--dry-run/);
+  });
+
+  it('warns in `strict enable`s own help, not only in the docs', () => {
+    const strict = buildProgram().commands.find((command) => command.name() === 'strict');
+    const enable = strict?.commands.find((command) => command.name() === 'enable');
+
+    // Someone about to switch on a fail-closed trigger over auth.users should not have
+    // to open a document to find that out.
+    expect(enable?.description()).toMatch(/ADVANCED/);
+    expect(enable?.description()).toMatch(/fails closed/i);
+    expect(enable?.description()).toMatch(/auth\.users/);
+  });
+
+  it('marks the dangerous escapes as dangerous where they are typed', () => {
+    const program = buildProgram();
+    const hookEnable = program.commands
+      .find((command) => command.name() === 'hook')
+      ?.commands.find((command) => command.name() === 'enable');
+    const uninstall = program.commands.find((command) => command.name() === 'uninstall');
+
+    expect(hookEnable?.helpInformation()).toMatch(/--skip-db-check[\s\S]*DANGEROUS/);
+    expect(uninstall?.helpInformation()).toMatch(/--database-only[\s\S]*DANGEROUS/);
+  });
+
   it('registers lifecycle safety flags explicitly', () => {
     const program = buildProgram();
     const repair = program.commands.find((command) => command.name() === 'repair');

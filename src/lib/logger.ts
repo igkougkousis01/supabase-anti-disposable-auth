@@ -17,6 +17,15 @@ export interface Logger {
   success(message: string): void;
   /** Something that is deliberately not configured yet, rather than broken. */
   pending(message: string): void;
+  /**
+   * Continuation of a warning or error: a hint, or a diagnostic line.
+   *
+   * Goes to stderr, with no symbol, so a failure arrives on one stream as one message.
+   * A hint printed to stdout while its error goes to stderr is worse than useless --
+   * `2>/dev/null` leaves an orphan instruction with nothing to explain it, and
+   * `>/dev/null` throws away the only line that says what to do next.
+   */
+  detail(message: string): void;
   warning(message: string): void;
   error(message: string): void;
 }
@@ -59,6 +68,9 @@ export function createLogger(options: LoggerOptions = {}): Logger {
     },
     pending(message) {
       write(out, `${SYMBOLS.pending} ${message}`);
+    },
+    detail(message) {
+      write(err, message);
     },
     warning(message) {
       write(err, `${SYMBOLS.warning} ${message}`);

@@ -20,14 +20,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20.x', '22.x']
+        # The supported range, and nothing else. 22 is the declared floor
+        # (engines.node is >=22.0.0) and 24 is the active LTS. Node 20 is end-of-life
+        # upstream and is deliberately absent: testing a runtime the package does not
+        # support would only invite someone to start supporting it.
+        node-version: ['22', '24']
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -44,9 +48,123 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      # Unit tests only. Integration tests need SUPABASE_DB_URL and skip themselves.
+      # Unit tests only. They never open a socket: the database connection and `fetch`
+      # are both injected. The database suites run in the `integration` job below.
       - name: Unit tests
         run: npm test
 
       - name: Build
         run: npm run build
+
+  integration:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to a major that Supabase actually runs, so the catalog behaviour the
+        # tests assert against is the behaviour users get.
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sada_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Without these roles the privilege-boundary tests skip themselves, and the job
+      # would pass while asserting nothing about the grants that keep `anon` and
+      # `authenticated` away from the policy tables. Creating them explicitly is what
+      # makes this job meaningful rather than merely green.
+      - name: Create the Supabase client roles
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d sada_test -v ON_ERROR_STOP=1 -c "
+            create role supabase_auth_admin nologin;
+            create role anon nologin;
+            create role authenticated nologin;
+          "
+
+      # SADA_TEST_DB_URL, never SUPABASE_DB_URL: these suites are destructive within the
+      # `guard` schema, and the variable a real project uses must never be able to name
+      # their target. This database is a disposable service container.
+      - name: Integration tests
+        env:
+          SADA_TEST_DB_URL: postgresql://postgres:postgres@localhost:5432/sada_test
+        run: npm run test:integration
+
+  package:
+    name: Package and smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          # The floor, so the packed artifact is exercised on the oldest runtime the
+          # package claims to support.
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: List package contents
+        run: npm pack --dry-run
+
+      # Everything below runs against the packed artifact rather than the source tree.
+      # Packaging mistakes -- a missing migrations directory, a bin that is not
+      # executable, an import that only resolves inside the repository -- are invisible
+      # to the test suite and fatal to a user's first command.
+      - name: Pack
+        run: npm pack --pack-destination /tmp
+
+      - name: Install the tarball in a clean project
+        run: |
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y > /dev/null
+          npm install /tmp/supabase-anti-disposable-auth-*.tgz
+
+      - name: Run the packed CLI
+        run: |
+          cd /tmp/smoke
+          npx supabase-anti-disposable-auth --version
+          npx supabase-anti-disposable-auth --help
+          npx supabase-anti-disposable-auth hook --help
+          npx supabase-anti-disposable-auth strict --help
+
+      - name: The version the package reports matches package.json
+        run: |
+          cd /tmp/smoke
+          test "$(npx supabase-anti-disposable-auth --version)" \
+             = "$(node -p "require('$GITHUB_WORKSPACE/package.json').version")"
+
+      - name: The migrations ship with the package
+        run: |
+          test -d /tmp/smoke/node_modules/supabase-anti-disposable-auth/migrations
+          test "$(ls /tmp/smoke/node_modules/supabase-anti-disposable-auth/migrations/*.sql | wc -l)" -eq 8
+
+      - name: The package carries no environment file
+        run: |
+          ! find /tmp/smoke/node_modules/supabase-anti-disposable-auth -name '.env*' | grep .

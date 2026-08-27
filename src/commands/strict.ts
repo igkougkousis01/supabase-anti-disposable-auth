@@ -623,8 +623,16 @@ export function strictModeExitCode(mode: StrictModeStatus['mode']): ExitCode {
 // Registration
 // ---------------------------------------------------------------------------
 
+/**
+ * Leads with the action, then the warning.
+ *
+ * The parallel with `strict disable` ("Remove the strict trigger...") matters in the
+ * command list, where a reader is scanning verbs. The warning still has to be here and
+ * not only in the docs -- `--help` is the last thing many people read before running a
+ * command that can stop every write to `auth.users`.
+ */
 const ADVANCED_NOTICE =
-  'ADVANCED: adds a BEFORE INSERT OR UPDATE OF email trigger on the Supabase-managed auth.users table. Fails closed — if the guard layer breaks, writes to auth.users are rejected.';
+  'Create the strict trigger on auth.users. ADVANCED: a BEFORE INSERT OR UPDATE OF email trigger on the Supabase-managed table, which fails closed — if the guard layer breaks, writes to auth.users are rejected.';
 
 export function registerStrictCommand(
   program: Command,

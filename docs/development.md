@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- **Node.js 20.12 or newer** (`node --version`)
+- **Node.js 22 or newer** (`node --version`)
 - **npm 10+**
 - Optional, for integration tests: a PostgreSQL database — a Supabase project or a local
   PostgreSQL instance
@@ -107,11 +107,13 @@ live upstream dataset.
 unless the relevant variable is set, which keeps `npm test` and CI offline by default.
 CI never requires Supabase credentials.
 
-There are seven, and the distinction between the variables matters:
+There are seven. **No suite reads `SUPABASE_DB_URL`** -- that is the credential the CLI
+uses against a real project, and a test run must never be able to name it. The
+distinction between the variables matters:
 
 | Variable                                                             | Used by                  | Effect                                                                                      |
 | -------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------- |
-| `SUPABASE_DB_URL`                                                    | `database.test.ts`       | Read-only: connects and reads `server_version`.                                             |
+| `SADA_TEST_DB_URL`                                                   | `database.test.ts`       | Read-only: connects and reads `server_version`.                                             |
 | `SADA_TEST_DB_URL`                                                   | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                               |
 | `SADA_TEST_DB_URL`                                                   | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly.           |
 | `SADA_TEST_DB_URL`                                                   | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.             |
@@ -295,6 +297,23 @@ npm run build
 declarations and source maps. Runtime dependencies (`commander`, `pg`, `zod`) stay
 external.
 
+**Source maps are shipped deliberately.** They carry relative source paths and embedded
+sources — no local absolute path leaks into the package — and they make a `--debug`
+stack trace from a bug report actionable when the reporter runs with
+`NODE_OPTIONS=--enable-source-maps`. The project is MIT and its source is public, so
+there is nothing in them that is not already on GitHub.
+
+**`src/index.ts` is the entire public API**, and it is deliberately small: the CLI
+entry points, the error types, `EXIT_CODES`, the logger factory and the package
+identity. Everything else is internal and free to change. Adding an export is a decision
+to support it forever — think before widening it, because removing one later is a
+breaking change.
+
+The `overrides` block in `package.json` pins `esbuild` to `^0.28.2` across the tree.
+`tsup` declares `^0.27.0`; the override keeps the whole dependency graph on one recent
+esbuild rather than whatever range resolution happens to pick, and the build is verified
+against it in CI on every push.
+
 Verify the built binary:
 
 ```bash
@@ -312,7 +331,15 @@ npm unlink -g supabase-anti-disposable-auth
 
 ## Quality gates
 
-The same commands run in CI, on Node 20 and 22:
+CI runs three jobs on every push and pull request:
+
+| Job           | What it does                                                                                               |
+| ------------- | ---------------------------------------------------------------------------------------------------------- |
+| `verify`      | Type check, lint, format check, unit tests and build, on Node 22 and 24.                                   |
+| `integration` | The database suites against a `postgres:17` service container, with the Supabase roles created explicitly. |
+| `package`     | `npm pack`, then installs the tarball in a clean project and runs the CLI from it.                         |
+
+Locally, that is:
 
 ```bash
 npm run typecheck
@@ -322,14 +349,20 @@ npm test
 npm run build
 ```
 
-Plus, locally, against a scratch database:
+plus, against a scratch database:
 
 ```bash
 SADA_TEST_DB_URL="postgresql://localhost:5432/supabase_anti_disposable_auth_test" npm run test:integration
 ```
 
-CI needs **no Supabase credentials of any kind** — no database URL and no Management API
-token. Every test that would need one skips itself.
+CI needs **no Supabase credentials of any kind** — no project database URL and no
+Management API token. The integration job uses a disposable service container named by
+`SADA_TEST_DB_URL`; the live hosted suite has no credentials in CI and skips itself.
+
+The `package` job exists because packaging mistakes are invisible to the test suite and
+fatal to a user's first command: a missing `migrations/` directory, an import that only
+resolves inside the repository, a `bin` that is not executable. It asserts the packed
+artifact reports the right version, ships all eight migrations, and contains no `.env`.
 
 Formatting:
 
@@ -554,11 +587,23 @@ The missing-grant and missing-hook repair cases require `supabase_auth_admin`. O
 scratch cluster those cases skip explicitly unless you created that synthetic role. Do
 not create cluster-wide roles automatically from the test suite.
 
+## Releasing
+
+The maintainer release procedure — quality gate, package inspection, tarball smoke test,
+tag, publish, GitHub Release — is in [releasing.md](releasing.md). Publishing is manual
+and deliberately not automated; the reasoning is on that page.
+
 ## Conventions
 
 - `process.env` is read **only** in `src/config/env.ts`. Everything else receives a
   validated `AppConfig`.
 - No `console.*` in `src/` — ESLint enforces it. Use the logger from `src/lib/logger.ts`.
+- **Streams.** Reports and help go to stdout so they can be piped; alerts (`warning`,
+  `error`) and the continuation lines of a failure (`detail`) go to stderr. A fatal
+  error and its hint always arrive on stderr **together** — a hint stranded on the other
+  stream by a redirection is a hint nobody reads. There is no colour and no spinner
+  anywhere, which is why the output needs no `NO_COLOR` handling and stays readable in a
+  CI log.
 - User-facing failures throw a subclass of `AppError`; anything else is treated as a bug
   and may print diagnostics.
 - Never log, persist, or pass a connection string as a process argument. Use

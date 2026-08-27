@@ -1,21 +1,20 @@
 # Security Policy
 
-## Project status
+## Supported versions
 
-This project is in early development. The CLI, the `guard` database schema, manual
-blocklist synchronisation, the **Before User Created hook function**, **hosted hook
-activation through the Supabase Management API** and an **optional strict trigger mode**
-exist. Conservative repair and ownership-verified uninstall are implemented. Strict mode
-is off by default and is not a substitute for the hook.
+| Version | Supported                                    |
+| ------- | -------------------------------------------- |
+| `1.x`   | Yes — fixes land in the latest `1.x` release |
+| `0.x`   | No — never published to npm                  |
 
-**Installing the hook function still does not switch protection on.** Supabase Auth must
-be configured to call it — by `hook enable`, the dashboard, or `config.toml`. Until that
-happens, no signup is filtered. There is no released version and no supported production
-deployment.
+Security fixes are released as a new patch version of the current minor. There is no
+long-term-support branch: this is a single-maintainer project, and promising backports
+across minors would be promising something that could not be kept.
 
-| Version | Supported                |
-| ------- | ------------------------ |
-| `0.1.x` | Pre-release, best effort |
+**Installing the hook function does not switch protection on.** Supabase Auth must be
+configured to call it — by `hook enable`, the dashboard, or `config.toml`. Until that
+happens, no signup is filtered, and `status` will say so. That is documented behaviour,
+not a vulnerability.
 
 ## Reporting a vulnerability
 
@@ -26,8 +25,8 @@ Use GitHub's private vulnerability reporting on this repository:
 issue that contains no exploit details and simply asks a maintainer to open a private
 channel.
 
-There is no dedicated security contact address for this project yet. When one exists it
-will be listed here.
+There is no dedicated security contact address for this project. GitHub's private
+reporting is the channel.
 
 Please include, as far as you can:
 
@@ -36,7 +35,13 @@ Please include, as far as you can:
 - the impact you believe it has.
 
 Expect an acknowledgement as soon as a maintainer sees the report. This is a
-volunteer-maintained project, so there is no guaranteed response time.
+single-maintainer, volunteer-run project: **no response time is promised, because none
+could be guaranteed.** Reports are taken seriously and handled as promptly as is
+realistic.
+
+Please allow a reasonable period for a fix before disclosing publicly. If you hear
+nothing at all, you are of course free to disclose — coordinated disclosure is a
+courtesy, not a gag.
 
 ## Scope
 

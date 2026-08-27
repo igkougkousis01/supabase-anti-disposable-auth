@@ -6,7 +6,7 @@ export default defineConfig({
     index: 'src/index.ts',
   },
   format: ['esm'],
-  target: 'node20',
+  target: 'node22',
   platform: 'node',
   dts: true,
   // Each entry must be self-contained: `cli.ts` decides whether it is the process

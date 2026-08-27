@@ -358,8 +358,8 @@ function printHookAndSyncSections(logger: Logger, report: StatusReport): void {
   // deployment is: guard layer healthy + hook active + strict mode disabled.
   printStrictSection(report.strict, logger);
   logger.blank();
-  logger.plain('Automatic sync');
-  logger.pending('Not configured (not implemented yet)');
+  logger.plain('Blocklist refresh');
+  logger.pending(`Manual only — run \`${CLI_NAME} sync\` (1.0 ships no scheduler)`);
 }
 
 /**

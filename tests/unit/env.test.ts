@@ -231,11 +231,16 @@ describe('requireManagementCredentials', () => {
 });
 
 describe('isSupportedNodeVersion', () => {
-  it.each(['20.12.0', 'v20.12.1', '22.0.0', '24.3.1'])('accepts %s', (version) => {
+  it.each(['22.0.0', 'v22.11.0', '24.3.1', '26.0.0'])('accepts %s', (version) => {
     expect(isSupportedNodeVersion(version)).toBe(true);
   });
 
-  it.each(['18.20.4', '20.11.9', 'v16.0.0', 'not-a-version'])('rejects %s', (version) => {
-    expect(isSupportedNodeVersion(version)).toBe(false);
-  });
+  // 20.12 is where `process.loadEnvFile` landed, so the code would run there. It is
+  // still rejected: the floor is the supported range, not the range that happens to work.
+  it.each(['18.20.4', '20.12.0', 'v20.19.4', '21.7.3', 'not-a-version'])(
+    'rejects %s',
+    (version) => {
+      expect(isSupportedNodeVersion(version)).toBe(false);
+    },
+  );
 });
