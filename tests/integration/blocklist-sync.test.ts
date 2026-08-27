@@ -96,11 +96,31 @@ async function scalar<T>(sql: string, parameters: string[] = []): Promise<T | un
   return result.rows[0]?.value;
 }
 
+/**
+ * Sorts a copy with JavaScript's own ordering.
+ *
+ * Used on **both** sides of every membership assertion below, because PostgreSQL text
+ * ordering is collation-dependent and blocklist membership is not. Under the `en_US.UTF-8`
+ * locale of a stock `postgres:17` container, punctuation carries less weight than letters,
+ * so `order by domain` returns `domain10.example` before `domain1.example`; under a `C`
+ * collation, and under JavaScript's code-unit `.sort()`, it is the other way round.
+ * Neither order is wrong, and neither is the behaviour these tests exist to pin down —
+ * so the comparison is made order-independent rather than the database being asked to
+ * sort the way one particular runtime happens to.
+ *
+ * Deliberately an array sort and not a `Set`: sorting keeps every element, so a missing
+ * domain, an extra domain and a duplicated domain all still fail the assertion. A
+ * set-based comparison would silently swallow the duplicate.
+ */
+function sorted(values: readonly string[]): string[] {
+  return [...values].sort();
+}
+
 async function blockedDomains(): Promise<string[]> {
   const result = await connection.query<{ domain: string }>(
-    'select domain from guard.blocked_domains order by domain',
+    'select domain from guard.blocked_domains',
   );
-  return result.rows.map((row) => row.domain);
+  return sorted(result.rows.map((row) => row.domain));
 }
 
 async function resetBlocklist(): Promise<void> {
@@ -221,7 +241,7 @@ describeIfConfigured('blocklist sync against a live database', () => {
       await runSync(dependencies(provider));
 
       const installed = await blockedDomains();
-      expect(installed).toEqual([...clean].sort());
+      expect(installed).toEqual(sorted(clean));
       for (const forbidden of [
         'never-extracted.example',
         'also-never.example',
@@ -253,7 +273,7 @@ describeIfConfigured('blocklist sync against a live database', () => {
 
       expect(report.outcome).toBe('updated');
       expect(report.firstSync).toBe(true);
-      expect(await blockedDomains()).toEqual([...domains].sort());
+      expect(await blockedDomains()).toEqual(sorted(domains));
     });
 
     it('records the source on every row', async () => {
@@ -298,7 +318,7 @@ describeIfConfigured('blocklist sync against a live database', () => {
       await runSync(dependencies(fixtureProvider(generateDomainList(20, 'new'))));
 
       const domains = await blockedDomains();
-      expect(domains).toEqual([...generateDomainList(20, 'new')].sort());
+      expect(domains).toEqual(sorted(generateDomainList(20, 'new')));
       expect(domains.some((domain) => domain.startsWith('old'))).toBe(false);
     });
 
@@ -340,7 +360,7 @@ describeIfConfigured('blocklist sync against a live database', () => {
         ),
       ).rejects.toThrow();
 
-      expect(await blockedDomains()).toEqual([...original].sort());
+      expect(await blockedDomains()).toEqual(sorted(original));
     });
 
     it('records the failure without overwriting the last known-good metadata', async () => {
@@ -390,9 +410,12 @@ describeIfConfigured('blocklist sync against a live database', () => {
       await runSync(dependencies(fixtureProvider(generateDomainList(20))));
 
       const allowed = await connection.query<{ domain: string; reason: string }>(
-        'select domain, reason from guard.allowed_domains order by domain',
+        'select domain, reason from guard.allowed_domains',
       );
-      expect(allowed.rows).toEqual([
+      // Sorted here for the same reason as `sorted()` above: the assertion is about
+      // which allowlist entries survived a sync, not about PostgreSQL's collation.
+      const rows = [...allowed.rows].sort((a, b) => (a.domain < b.domain ? -1 : 1));
+      expect(rows).toEqual([
         { domain: 'company.example', reason: 'internal' },
         { domain: 'partner.example', reason: 'contractual' },
       ]);
@@ -431,7 +454,7 @@ describeIfConfigured('blocklist sync against a live database', () => {
       const report = await runSync(dependencies(fixtureProvider(domains)));
 
       expect(report.outcome).toBe('unchanged');
-      expect(await blockedDomains()).toEqual([...domains].sort());
+      expect(await blockedDomains()).toEqual(sorted(domains));
       // Untouched rows keep their original created_at, which is the observable proof
       // that nothing was deleted and reinserted.
       expect(
@@ -461,7 +484,7 @@ describeIfConfigured('blocklist sync against a live database', () => {
         runSync(dependencies(fixtureProvider(generateDomainList(4, 'tiny')))),
       ).rejects.toThrow(SuspiciousUpdateError);
 
-      expect(await blockedDomains()).toEqual([...original].sort());
+      expect(await blockedDomains()).toEqual(sorted(original));
     });
   });
 
@@ -482,7 +505,7 @@ describeIfConfigured('blocklist sync against a live database', () => {
       expect(report.added).toBe(5);
       expect(report.removed).toBe(5);
 
-      expect(await blockedDomains()).toEqual([...installed].sort());
+      expect(await blockedDomains()).toEqual(sorted(installed));
       const metadataAfter = await connection.query(
         'select * from guard.sync_metadata where source = $1',
         [SOURCE],

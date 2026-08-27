@@ -134,37 +134,54 @@ jobs:
         run: npm pack --dry-run
 
       # Everything below runs against the packed artifact rather than the source tree.
-      # Packaging mistakes -- a missing migrations directory, a bin that is not
-      # executable, an import that only resolves inside the repository -- are invisible
+      # Packaging mistakes -- a missing migrations directory, a `bin` whose target was
+      # never built, an import that only resolves inside the repository -- are invisible
       # to the test suite and fatal to a user's first command.
+      - name: Build
+        run: npm run build
+
       - name: Pack
-        run: npm pack --pack-destination /tmp
-
-      - name: Install the tarball in a clean project
         run: |
-          mkdir -p /tmp/smoke && cd /tmp/smoke
+          # `npm pack --silent` silences npm, but the `prepack` build writes to the same
+          # stdout, so the filename is the LAST line rather than the only one.
+          TARBALL="$(npm pack --silent | tail -n 1)"
+          test -f "$TARBALL"
+          # A shell variable does not survive into the next step; $GITHUB_ENV does.
+          echo "TARBALL_PATH=$GITHUB_WORKSPACE/$TARBALL" >> "$GITHUB_ENV"
+
+      - name: Install the tarball in a clean project and run the CLI from it
+        run: |
+          set -euo pipefail
+          test -f "$TARBALL_PATH"
+
+          rm -rf /tmp/sada-smoke
+          mkdir -p /tmp/sada-smoke
+          cd /tmp/sada-smoke
           npm init -y > /dev/null
-          npm install /tmp/supabase-anti-disposable-auth-*.tgz
+          npm install "$TARBALL_PATH"
 
-      - name: Run the packed CLI
-        run: |
-          cd /tmp/smoke
-          npx supabase-anti-disposable-auth --version
-          npx supabase-anti-disposable-auth --help
-          npx supabase-anti-disposable-auth hook --help
-          npx supabase-anti-disposable-auth strict --help
+          # The installed bin link, not `npx`: this proves the tarball declared a `bin`
+          # whose target exists, and stops npx from masking a broken package by falling
+          # back to a registry lookup.
+          test -x node_modules/.bin/supabase-anti-disposable-auth
+
+          ./node_modules/.bin/supabase-anti-disposable-auth --version
+          ./node_modules/.bin/supabase-anti-disposable-auth --help
+          ./node_modules/.bin/supabase-anti-disposable-auth hook --help
+          ./node_modules/.bin/supabase-anti-disposable-auth strict --help
 
       - name: The version the package reports matches package.json
         run: |
-          cd /tmp/smoke
-          test "$(npx supabase-anti-disposable-auth --version)" \
+          set -euo pipefail
+          cd /tmp/sada-smoke
+          test "$(./node_modules/.bin/supabase-anti-disposable-auth --version)" \
              = "$(node -p "require('$GITHUB_WORKSPACE/package.json').version")"
 
       - name: The migrations ship with the package
         run: |
-          test -d /tmp/smoke/node_modules/supabase-anti-disposable-auth/migrations
-          test "$(ls /tmp/smoke/node_modules/supabase-anti-disposable-auth/migrations/*.sql | wc -l)" -eq 8
+          test -d /tmp/sada-smoke/node_modules/supabase-anti-disposable-auth/migrations
+          test "$(ls /tmp/sada-smoke/node_modules/supabase-anti-disposable-auth/migrations/*.sql | wc -l)" -eq 8
 
       - name: The package carries no environment file
         run: |
-          ! find /tmp/smoke/node_modules/supabase-anti-disposable-auth -name '.env*' | grep .
+          ! find /tmp/sada-smoke/node_modules/supabase-anti-disposable-auth -name '.env*' | grep .
