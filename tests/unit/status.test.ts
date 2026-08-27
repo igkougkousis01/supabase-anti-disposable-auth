@@ -385,7 +385,8 @@ describe('printing the hook section', () => {
     // The operator needs somewhere to go. The one place they must NOT be sent is
     // the migration history -- editing it or replaying a recorded migration by hand
     // is how a working installation gets broken further.
-    expect(output()).toContain('Repairing the auth hook grants');
+    expect(output()).toContain('repair --dry-run');
+    expect(output()).toContain('repair` to restore them');
     expect(output()).not.toMatch(/re-?apply the grants from/i);
     expect(output()).not.toMatch(/re-?run .*migration/i);
     expect(output()).not.toMatch(/edit .*schema_migrations/i);
@@ -509,7 +510,8 @@ describe('printStatusReport', () => {
 
     // Re-running install replays nothing, because the migration row is still there.
     expect(output()).toContain('will not recreate them');
-    expect(output()).toContain('Drop the guard schema and reinstall');
+    expect(output()).toContain('repair --dry-run');
+    expect(output()).toContain('missing data tables require manual recovery');
   });
 
   it('never prints the connection string or password', async () => {

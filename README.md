@@ -11,7 +11,8 @@ The **database policy engine works**, `sync` keeps its blocklist current from an
 source, `install` creates the **Before User Created auth hook function**, and
 `hook enable` **activates it** in a hosted project's Supabase Auth configuration. An
 **optional strict trigger mode** adds a database-level backstop; it is off by default and
-is not a replacement for the hook — see
+is not a replacement for the hook. Safe `repair` and ownership-verified `uninstall`
+workflows are also available — see
 [Strict database enforcement](#strict-database-enforcement-optional).
 
 > **⚠️ Installing the hook function is still not the same as turning protection on.**
@@ -73,7 +74,6 @@ network call and no dependency on this CLI ever running again.
 Planned, not yet built (see [docs/roadmap.md](docs/roadmap.md)):
 
 - **Scheduled** blocklist refresh with `pg_cron` (manual refresh works today)
-- Safe uninstall flow with dry-run support
 
 Optional strict PostgreSQL trigger enforcement is **built** and **off by default**.
 
@@ -94,24 +94,26 @@ To run it from a clone, see [docs/development.md](docs/development.md).
 
 ## Commands
 
-| Command          | Status              | Purpose                                                            |
-| ---------------- | ------------------- | ------------------------------------------------------------------ |
-| `doctor`         | **Available**       | Validate the local environment and database connectivity.          |
-| `install`        | **Available**       | Create the guard schema, policy engine and hook function.          |
-| `status`         | **Available**       | Report the guard schema, and remote activation when credentialled. |
-| `sync`           | **Available**       | Refresh the disposable-domain blocklist. Manual only.              |
-| `hook status`    | **Available**       | Report what Supabase Auth is actually configured to call.          |
-| `hook enable`    | **Available**       | Point Supabase Auth at the guard hook and switch it on.            |
-| `hook disable`   | **Available**       | Switch the guard hook off, leaving its URI in place.               |
-| `strict status`  | **Available**       | Report the optional trigger backstop on `auth.users`.              |
-| `strict enable`  | **Available**       | **Advanced, opt-in.** Create the strict trigger on `auth.users`.   |
-| `strict disable` | **Available**       | Remove the strict trigger. Leaves the function in place.           |
-| `uninstall`      | Not implemented yet | Remove everything the CLI installed.                               |
+| Command          | Status        | Purpose                                                            |
+| ---------------- | ------------- | ------------------------------------------------------------------ |
+| `doctor`         | **Available** | Validate the local environment and database connectivity.          |
+| `install`        | **Available** | Create the guard schema, policy engine and hook function.          |
+| `repair`         | **Available** | Restore only known-safe drift; refuse data loss and conflicts.     |
+| `status`         | **Available** | Report the guard schema, and remote activation when credentialled. |
+| `sync`           | **Available** | Refresh the disposable-domain blocklist. Manual only.              |
+| `hook status`    | **Available** | Report what Supabase Auth is actually configured to call.          |
+| `hook enable`    | **Available** | Point Supabase Auth at the guard hook and switch it on.            |
+| `hook disable`   | **Available** | Switch the guard hook off, leaving its URI in place.               |
+| `strict status`  | **Available** | Report the optional trigger backstop on `auth.users`.              |
+| `strict enable`  | **Available** | **Advanced, opt-in.** Create the strict trigger on `auth.users`.   |
+| `strict disable` | **Available** | Remove the strict trigger. Leaves the function in place.           |
+| `uninstall`      | **Available** | Disable integrations and remove only verified guard-owned objects. |
 
-`doctor`, `install`, `status`, `sync` and the `strict` commands need only
+`doctor`, `install`, `repair`, `status`, `sync` and the `strict` commands need only
 `SUPABASE_DB_URL`. The `hook` commands need Management API credentials — and
-`hook enable` needs both. A missing Management API credential never breaks a
-database-only command.
+`hook enable` needs both. `repair` checks remote state only when optional Management API
+credentials are present. Full `uninstall` requires both systems; its explicit
+`--database-only` mode does not.
 
 Global flags:
 
@@ -208,6 +210,126 @@ Supabase Auth activation is still required — signups are not filtered yet.
 The activation notice is printed on **every** successful run, including a no-op one. An
 operator who runs `install` twice and only sees the caveat the first time would
 reasonably read the second run as confirmation that they are covered.
+
+### `repair`
+
+`repair` keeps the tool installed and restores only drift whose target and intended
+definition can be proved. Preview first when investigating a damaged project:
+
+```bash
+supabase-anti-disposable-auth repair --dry-run
+supabase-anti-disposable-auth repair
+```
+
+Its assessment has five stable states:
+
+| State                    | Meaning                                                       |
+| ------------------------ | ------------------------------------------------------------- |
+| `healthy`                | No change is needed.                                          |
+| `repairable`             | Only an admitted fixed repair is required.                    |
+| `manual-action-required` | Data loss or a non-leaf policy object may be involved.        |
+| `conflict`               | Ownership, definition, trigger, or remote evidence disagrees. |
+| `not-installed`          | No `guard` schema exists; use `install`, not `repair`.        |
+
+Automatic repair is deliberately narrow:
+
+- restore missing privileges from the existing six-item, read-only
+  `supabase_auth_admin` grant set;
+- recreate `guard.before_user_created(jsonb)` when migration 006 is verified but that
+  leaf function is gone;
+- recreate the inert `guard.enforce_auth_user_email()` function when migration 008 is
+  verified but that leaf function is gone.
+
+The function repair extracts exactly one `CREATE FUNCTION` statement from the bundled,
+checksummed definition and applies it as surgical DDL. It does **not** rerun the
+historical migration batch and does not write migration history.
+
+Repair refuses missing blocklist, allowlist, sync, or migration-history tables; missing
+core policy functions; altered same-name objects; foreign objects in `guard`; owner
+mismatches; migration checksum/history disagreement; a foreign strict trigger; and a
+foreign hosted hook. Missing core data is reported as possible data loss, never replaced
+with an empty table and called healthy.
+
+When Management API credentials are available, repair reads hosted hook state. It never
+sends a PATCH. A disabled hosted hook stays disabled, and an absent strict trigger stays
+absent: repair restores installed database health, not enforcement intent.
+
+`--dry-run` performs the same ownership, catalog, grant, strict, and optional remote
+checks and prints the exact admitted changes, but executes no DDL and no remote write.
+
+### `uninstall`
+
+`uninstall` is full, permanent removal. Preview is non-mutating and needs no
+confirmation:
+
+```bash
+supabase-anti-disposable-auth uninstall --dry-run
+```
+
+Execution requires explicit destructive intent:
+
+```bash
+supabase-anti-disposable-auth uninstall --yes
+```
+
+Without `--yes`, the command prints the same plan and exits without changing anything.
+`--yes` confirms destruction; it never bypasses a conflict, ownership check, remote
+verification, or dependency refusal.
+
+The plan prints current blocklist and allowlist row counts. A full uninstall permanently
+removes the reproducible blocklist, operator-managed allowlist decisions, sync metadata,
+append-only migration history, all verified guard functions, and the schema. There is no
+`--preserve-data`: disabling enforcement while retaining data is already expressed
+clearly by `hook disable` and `strict disable`.
+
+The execution order is fixed:
+
+```text
+1. verify all database, strict-trigger, dependency, and remote ownership evidence
+2. remove our strict trigger, if present
+3. read hosted state again; disable our Before User Created hook; verify it is off
+4. recheck database ownership after the cross-system operation
+5. explicitly drop owned functions and tables in one PostgreSQL transaction
+6. drop the now-empty guard schema
+```
+
+The remote hook is disabled and verified before its database function can be removed.
+If the slot points to another hook, uninstall stops before any mutation. Full uninstall
+also refuses when Management API credentials are absent, because it cannot prove that
+Supabase Auth will not call the function after deletion.
+
+For local PostgreSQL or a deliberately separate database teardown, an explicit escape
+hatch exists:
+
+```bash
+supabase-anti-disposable-auth uninstall --database-only --dry-run
+supabase-anti-disposable-auth uninstall --database-only --yes
+```
+
+`--database-only` never reads or writes hosted state unless Management credentials are
+already available. If the hosted hook is proven active, it refuses. If remote state is
+unknown, the warning is intentionally severe: the operator is choosing to remove the
+database function without proving that hosted Auth is no longer calling it.
+
+Before database removal, the CLI verifies migration checksums, expected object names and
+kinds, owners, table/constraint shape, function bodies and security properties. It
+refuses unexpected relations, routines, constraints, triggers, policies, rules, types,
+operators, collations, or conversions inside `guard`. PostgreSQL dependency catalogs are
+also checked for views, triggers, functions, policies, or other objects outside `guard`
+that depend on it.
+
+Cleanup uses fixed identifiers and explicit `DROP FUNCTION` / `DROP TABLE` statements.
+It never runs `DROP SCHEMA guard CASCADE`, `DROP OWNED`, or any other broad deletion.
+The final plain `DROP SCHEMA guard` is an additional safety assertion that the schema is
+empty. A dependency missed by preflight makes PostgreSQL reject and roll back cleanup;
+it is never silently cascaded through.
+
+The Management API and PostgreSQL cannot share a transaction. Uninstall therefore
+prioritises a safe resumable state: if remote disable succeeds and database cleanup
+fails, Auth is safely off and the schema remains; rerunning continues. If strict removal
+succeeds and the remote API then fails, the guard schema remains intact. Every step is
+idempotent, so already-disabled, already-absent, and partially completed states are safe
+to rerun.
 
 ### `sync`
 
@@ -1000,20 +1122,16 @@ message is generic on purpose.
 
 ### Removing the hook
 
-Order matters, and getting it wrong breaks signups:
+For a full removal, use the ownership-checked workflow rather than manual DDL:
 
 ```bash
-# 1. If strict mode is on, switch it off first.
-supabase-anti-disposable-auth strict disable
-
-# 2. Stop Supabase Auth calling the function.
-supabase-anti-disposable-auth hook disable
-
-# 3. Only then remove the database objects.
+supabase-anti-disposable-auth uninstall --dry-run
+supabase-anti-disposable-auth uninstall --yes
 ```
 
-The full ordering, including strict mode, is set out in
-[Safe removal order](#safe-removal-order).
+The command enforces the full ordering described under [`uninstall`](#uninstall):
+strict trigger first, hosted hook disable and verification second, explicit database
+cleanup last.
 
 On a local stack, step 1 is removing the `[auth.hook.before_user_created]` block from
 `config.toml` and restarting.
@@ -1023,7 +1141,8 @@ exists, and **every signup fails** until the configuration catches up. This is w
 `hook disable` needs no database access at all: the step that stops the bleeding must
 work even when the database does not.
 
-Full `uninstall` is not implemented yet — see [docs/roadmap.md](docs/roadmap.md).
+Manual `hook disable` remains useful when enforcement must be paused without deleting
+data. It intentionally leaves all database objects in place.
 
 ### Strict database enforcement (optional)
 
@@ -1373,28 +1492,21 @@ guarantee for your hardware.
 
 #### Safe removal order
 
-If strict mode and the Auth hook are both on, remove them in this order:
+If strict mode and the Auth hook are both on, `uninstall` applies this order:
 
 ```bash
-# 1. Stop the database-level backstop rejecting writes.
-supabase-anti-disposable-auth strict disable
-
-# 2. Stop Supabase Auth calling the hook function.
-supabase-anti-disposable-auth hook disable
-
-# 3. Only now remove the database objects (full `uninstall` is not built yet).
-#    drop schema guard cascade;
+supabase-anti-disposable-auth uninstall --dry-run
+supabase-anti-disposable-auth uninstall --yes
 ```
 
 Steps 1 and 2 are interchangeable in principle — neither depends on the other — but
 strict mode first is the safer habit: it is the layer that blocks writes rather than
 merely filtering them.
 
-Step 3 last is **not** optional. Dropping `guard` while either layer is still switched on
-leaves that layer pointing at objects that no longer exist. For the hook that means every
-signup fails; for the trigger, `DROP SCHEMA guard CASCADE` takes the trigger with it
-(PostgreSQL will not orphan a trigger whose function is being dropped), so writes recover
-— but the window between the two is a window in which they do not.
+Database cleanup last is **not** optional. Dropping `guard` while the hosted hook is
+still switched on leaves Auth calling an absent function and every signup fails. The
+command never uses `CASCADE`; it verifies and explicitly removes its trigger and guard
+objects, and refuses foreign dependencies.
 
 ### `status`
 
@@ -1614,57 +1726,23 @@ development.
 
 #### The remediation
 
-Idempotent, role-guarded, and grants **exactly** the privileges
-`007_auth_hook_permissions.sql` grants — nothing wider. Run it against the same
-database as `SUPABASE_DB_URL`, as a role that owns the `guard` schema (normally
-`postgres`):
-
-```sql
--- Repairs guard's auth-hook grants. Safe to run any number of times, on any database,
--- including one where supabase_auth_admin does not exist or the grants are already
--- correct. Grants only the SECURITY INVOKER call chain guard.before_user_created()
--- needs: no writes, no CREATE, nothing on sync_metadata or schema_migrations.
-do $$
-begin
-  if not exists (select 1 from pg_catalog.pg_roles where rolname = 'supabase_auth_admin') then
-    raise notice 'supabase_auth_admin does not exist here; nothing to grant.';
-    return;
-  end if;
-
-  execute 'grant usage on schema guard to supabase_auth_admin';
-  execute 'grant execute on function guard.before_user_created(jsonb) to supabase_auth_admin';
-  execute 'grant execute on function guard.is_disposable_domain(text) to supabase_auth_admin';
-  execute 'grant execute on function guard.normalize_domain(text) to supabase_auth_admin';
-  execute 'grant select on guard.blocked_domains to supabase_auth_admin';
-  execute 'grant select on guard.allowed_domains to supabase_auth_admin';
-end;
-$$;
-```
-
-Then confirm it worked:
+Preview and apply the fixed least-privilege repair:
 
 ```bash
-supabase-anti-disposable-auth status
+supabase-anti-disposable-auth repair --dry-run
+supabase-anti-disposable-auth repair
 ```
 
-The grant line must read `✓ Grants: supabase_auth_admin can execute the hook` and the
-command must exit `0`.
-
-**The supported alternative** is to drop the `guard` schema and run
-`supabase-anti-disposable-auth install` again. That replays the whole migration set
-against a database where the role now exists, so 007 takes its granting branch. It
-costs the blocked-domain list, which `sync` rebuilds.
+Repair grants exactly `USAGE` on `guard`, `EXECUTE` on the hook and its two called
+functions, and `SELECT` on the blocklist and allowlist. It grants no write privilege,
+no `CREATE`, and no access to `sync_metadata` or `schema_migrations`. If the role is
+absent, it reports `manual-action-required` and changes nothing.
 
 > **Do not edit `guard.schema_migrations`, and do not re-run a recorded migration file
 > by hand.** Deleting a history row to make `install` replay a migration defeats the
 > checksum audit the runner exists to provide, and re-running historical DDL by hand
-> can apply it in the wrong order relative to migrations written after it. The snippet
-> above changes privileges only and touches no history.
-
-This branch deliberately ships no `repair` command. A general privilege-repair
-subsystem is a larger design question — what it may change, what it must refuse to
-change, and how it proves it did no harm — and is tracked in
-[docs/roadmap.md](docs/roadmap.md).
+> can apply it in the wrong order relative to migrations written after it. `repair`
+> changes current catalog state only and leaves the append-only evidence untouched.
 
 ## The `guard` schema
 
@@ -1769,6 +1847,9 @@ migrations.
 | `8`  | Before User Created is configured to a different hook                       |
 | `9`  | A remote change was accepted but did not take effect                        |
 | `10` | The strict trigger name on `auth.users` is taken by a different trigger     |
+| `11` | Repair conflict: ownership or an owned-name definition is ambiguous         |
+| `12` | Uninstall conflict: a destructive target or dependency is not verified      |
+| `13` | Destructive uninstall confirmation is required (`--yes`)                    |
 
 Code `5` is deliberately distinct from `3`. A CI job needs to tell "I could not reach
 the database" apart from "I reached it, and the guard layer is not installed" — so a
@@ -1799,16 +1880,21 @@ PostgreSQL trigger, and the fix is SQL. A CI job that routes both to a human sti
 to know which system to send them to. Strict mode simply being **off** is never `10` — it
 is the default state and exits `0`.
 
+Codes `11` and `12` are lifecycle safety verdicts, not generic SQL failures. They mean
+the database answered and the command deliberately refused to overwrite or delete
+ambiguous state. Code `13` means the uninstall plan passed its safety checks but no
+destructive confirmation was supplied; dry-run never requires confirmation.
+
 Missing credentials remain `2`, a database health problem remains `5`. Those six
-outcomes are never conflated.
+families of outcomes are never conflated.
 
 ## Environment variables
 
-| Variable                | Required by                                                      | Description                                            |
-| ----------------------- | ---------------------------------------------------------------- | ------------------------------------------------------ |
-| `SUPABASE_DB_URL`       | `doctor`, `install`, `status`, `sync`, `strict *`, `hook enable` | PostgreSQL connection string for your Supabase project |
-| `SUPABASE_PROJECT_REF`  | `hook *`; optional for `status`                                  | The 20-character project ref from your dashboard URL   |
-| `SUPABASE_ACCESS_TOKEN` | `hook *`; optional for `status`                                  | Management API access token. **Highest-value secret.** |
+| Variable                | Required by                                                                   | Description                                            |
+| ----------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `SUPABASE_DB_URL`       | `doctor`, `install`, `repair`, `status`, `sync`, `strict *`, full `uninstall` | PostgreSQL connection string for your Supabase project |
+| `SUPABASE_PROJECT_REF`  | `hook *`, full `uninstall`; optional for `status` and `repair`                | The 20-character project ref from your dashboard URL   |
+| `SUPABASE_ACCESS_TOKEN` | `hook *`, full `uninstall`; optional for `status` and `repair`                | Management API access token. **Highest-value secret.** |
 
 Configuration is validated in one place and required **per command**. A missing
 Management API credential never breaks a database-only command, and a missing

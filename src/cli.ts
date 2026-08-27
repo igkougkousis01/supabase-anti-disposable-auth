@@ -14,6 +14,7 @@ import { Command } from 'commander';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerHookCommand } from './commands/hook.js';
 import { registerInstallCommand } from './commands/install.js';
+import { registerRepairCommand } from './commands/repair.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerStrictCommand } from './commands/strict.js';
 import { registerSyncCommand } from './commands/sync.js';
@@ -37,10 +38,11 @@ export function buildProgram(logger: Logger = defaultLogger): Command {
   registerDoctorCommand(program, logger);
   registerHookCommand(program, logger);
   registerInstallCommand(program, logger);
+  registerRepairCommand(program, logger);
   registerStatusCommand(program, logger);
   registerStrictCommand(program, logger);
   registerSyncCommand(program, logger);
-  registerUninstallCommand(program);
+  registerUninstallCommand(program, logger);
 
   return program;
 }

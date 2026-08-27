@@ -28,12 +28,11 @@
  * manual step and not something the suite does to you.
  */
 
-import { readFile } from 'node:fs/promises';
-
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createPostgresConnection } from '../../src/database/client.js';
 import { runMigrations } from '../../src/database/migrations.js';
+import { RESTORE_AUTH_HOOK_GRANTS_SQL } from '../../src/database/repair.js';
 import { readGuardSchemaStatus } from '../../src/database/schema-status.js';
 import { statusExitCode } from '../../src/commands/status.js';
 import { statusReportFor } from '../helpers/status.js';
@@ -102,35 +101,6 @@ async function scalar<T>(sql: string, parameters: (string | null)[] = []): Promi
 
 async function dropGuardSchema(): Promise<void> {
   await connection.execute('drop schema if exists guard cascade');
-}
-
-/**
- * Extracts the grant-repair snippet the README documents, so the test runs the
- * *published* remediation rather than a copy of it.
- *
- * A copy would pass forever while the README drifted into something that no longer
- * works -- and the README is the only place an operator is sent when `status` reports
- * missing grants, so a snippet that does not work there is a real defect.
- */
-async function readDocumentedGrantRepair(): Promise<string> {
-  const readme = await readFile(new URL('../../README.md', import.meta.url), 'utf8');
-
-  const section = readme.indexOf('#### The remediation');
-  expect(section).toBeGreaterThan(-1);
-
-  const open = readme.indexOf('```sql', section);
-  const start = readme.indexOf('\n', open) + 1;
-  const end = readme.indexOf('```', start);
-  expect(open).toBeGreaterThan(-1);
-  expect(end).toBeGreaterThan(start);
-
-  const snippet = readme.slice(start, end).trim();
-
-  // Sanity-check what was extracted before running it against a database.
-  expect(snippet).toContain('supabase_auth_admin');
-  expect(snippet).toContain('pg_catalog.pg_roles');
-
-  return snippet;
 }
 
 /**
@@ -1225,10 +1195,10 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
       });
     });
 
-    it('is repaired by the snippet the README documents', async (ctx) => {
+    it('is repaired by the fixed routine used by the repair command', async (ctx) => {
       if (!authRolePresent) ctx.skip();
 
-      const repair = await readDocumentedGrantRepair();
+      const repair = RESTORE_AUTH_HOOK_GRANTS_SQL;
 
       await withNoGrants(async () => {
         expect((await readGuardSchemaStatus(connection)).authHookGrants).toBe('incomplete');
@@ -1248,7 +1218,7 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
     it('grants nothing wider than 007 does', async (ctx) => {
       if (!authRolePresent) ctx.skip();
 
-      const repair = await readDocumentedGrantRepair();
+      const repair = RESTORE_AUTH_HOOK_GRANTS_SQL;
 
       await withNoGrants(async () => {
         await connection.execute(repair);
@@ -1301,7 +1271,7 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
     it('is idempotent and safe to run when the grants are already correct', async (ctx) => {
       if (!authRolePresent) ctx.skip();
 
-      const repair = await readDocumentedGrantRepair();
+      const repair = RESTORE_AUTH_HOOK_GRANTS_SQL;
 
       // No revoke here: this is the healthy database, and the snippet must be a
       // no-op on it rather than something an operator has to reason about first.
@@ -1318,18 +1288,18 @@ describeIfConfigured('guard.before_user_created against a live database', () => 
       }
     });
 
-    it('runs without error on a server that has no supabase_auth_admin', async () => {
-      // The role guard is not decoration: an operator on a plain PostgreSQL database
-      // must be able to paste this without it failing. Asserted unconditionally by
-      // pointing the check at a role name that cannot exist.
-      const repair = (await readDocumentedGrantRepair()).replaceAll(
+    it('cannot fabricate a missing auth role when the planner boundary is bypassed', async () => {
+      // The repair planner detects a missing role and refuses before executing SQL.
+      // If a caller bypasses that boundary, PostgreSQL must still reject the grant;
+      // the repair routine never creates roles or claims success.
+      const repair = RESTORE_AUTH_HOOK_GRANTS_SQL.replaceAll(
         AUTH_ROLE,
         'guard_absent_role_for_test',
       );
 
       await connection.execute('begin');
       try {
-        await expect(connection.execute(repair)).resolves.not.toThrow();
+        await expect(connection.execute(repair)).rejects.toThrow();
       } finally {
         await connection.execute('rollback');
       }

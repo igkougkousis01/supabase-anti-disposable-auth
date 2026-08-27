@@ -36,7 +36,7 @@ const ALLOWED_DOMAINS_TABLE = `${GUARD_SCHEMA}.allowed_domains`;
 export const AUTH_HOOK_ROLE = 'supabase_auth_admin';
 
 /** A single `has_*_privilege()` probe. */
-interface PrivilegeProbe {
+export interface PrivilegeProbe {
   /** Which `has_*_privilege` family answers this. */
   readonly kind: 'schema' | 'function' | 'table';
   readonly object: string;
@@ -51,7 +51,7 @@ interface PrivilegeProbe {
  * EXECUTE on the entry point. It mirrors 007_auth_hook_permissions.sql exactly, and
  * an integration test asserts the two agree.
  */
-const REQUIRED_AUTH_HOOK_GRANTS: PrivilegeProbe[] = [
+export const REQUIRED_AUTH_HOOK_GRANTS: readonly PrivilegeProbe[] = [
   { kind: 'schema', object: GUARD_SCHEMA, privilege: 'USAGE' },
   { kind: 'function', object: HOOK_FUNCTION, privilege: 'EXECUTE' },
   { kind: 'function', object: LOOKUP_FUNCTION, privilege: 'EXECUTE' },
@@ -255,6 +255,36 @@ async function readAuthHookGrants(
   return { state: missing.length > 0 ? 'incomplete' : 'granted', missing };
 }
 
+export interface AuthHookGrantInspection {
+  readonly rolePresent: boolean;
+  readonly missing: string[];
+}
+
+/**
+ * Probes the least-privilege hook grant set even when one of its objects is missing.
+ *
+ * The ordinary status path deliberately reports grants as `unknown` when an object is
+ * absent. Repair needs a more granular answer so its dry-run can name the exact grants
+ * that would change. Passing object OIDs obtained through `to_reg*` makes a missing
+ * object a false result rather than an exception; no catalog state is modified.
+ */
+export async function inspectAuthHookGrants(
+  connection: DatabaseConnection,
+): Promise<AuthHookGrantInspection> {
+  if (!(await roleExists(connection, AUTH_HOOK_ROLE))) {
+    return { rolePresent: false, missing: [] };
+  }
+
+  const missing: string[] = [];
+  for (const probe of REQUIRED_AUTH_HOOK_GRANTS) {
+    if (!(await hasPrivilegeSafely(connection, AUTH_HOOK_ROLE, probe))) {
+      missing.push(`${probe.privilege} on ${probe.object}`);
+    }
+  }
+
+  return { rolePresent: true, missing };
+}
+
 async function roleExists(connection: DatabaseConnection, role: string): Promise<boolean> {
   const result = await connection.query<{ present: boolean }>(
     'select exists (select 1 from pg_catalog.pg_roles where rolname = $1) as present',
@@ -284,6 +314,26 @@ async function hasPrivilege(
     probe.privilege,
   ]);
 
+  return result.rows[0]?.present === true;
+}
+
+async function hasPrivilegeSafely(
+  connection: DatabaseConnection,
+  role: string,
+  probe: PrivilegeProbe,
+): Promise<boolean> {
+  const sql = {
+    schema: 'select coalesce(has_schema_privilege($1, $2, $3), false) as present',
+    function:
+      'select coalesce(has_function_privilege($1, to_regprocedure($2), $3), false) as present',
+    table: 'select coalesce(has_table_privilege($1, to_regclass($2), $3), false) as present',
+  }[probe.kind];
+
+  const result = await connection.query<{ present: boolean }>(sql, [
+    role,
+    probe.object,
+    probe.privilege,
+  ]);
   return result.rows[0]?.present === true;
 }
 

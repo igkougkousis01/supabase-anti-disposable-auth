@@ -5,7 +5,16 @@ import { describe, expect, it } from 'vitest';
 import { buildProgram } from '../../src/cli.js';
 import { getPackageVersion } from '../../src/lib/package-info.js';
 
-const EXPECTED_COMMANDS = ['doctor', 'hook', 'install', 'status', 'strict', 'sync', 'uninstall'];
+const EXPECTED_COMMANDS = [
+  'doctor',
+  'hook',
+  'install',
+  'repair',
+  'status',
+  'strict',
+  'sync',
+  'uninstall',
+];
 
 /** Subcommands of `hook`. Registered as a group so later hook operations have a home. */
 const EXPECTED_HOOK_SUBCOMMANDS = ['status', 'enable', 'disable'];
@@ -82,5 +91,16 @@ describe('buildProgram', () => {
       expect(help).toContain(command);
     }
     expect(help).toContain('--version');
+  });
+
+  it('registers lifecycle safety flags explicitly', () => {
+    const program = buildProgram();
+    const repair = program.commands.find((command) => command.name() === 'repair');
+    const uninstall = program.commands.find((command) => command.name() === 'uninstall');
+
+    expect(repair?.helpInformation()).toContain('--dry-run');
+    expect(uninstall?.helpInformation()).toContain('--dry-run');
+    expect(uninstall?.helpInformation()).toContain('--yes');
+    expect(uninstall?.helpInformation()).toContain('--database-only');
   });
 });
