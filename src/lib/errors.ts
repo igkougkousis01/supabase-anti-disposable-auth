@@ -36,11 +36,48 @@ export const EXIT_CODES = {
    * them would send every sync failure to the wrong place.
    */
   sync: 6,
+  /**
+   * The Supabase Management API could not be used.
+   *
+   * Covers everything between "we asked" and "we have an answer we trust": a rejected
+   * token, insufficient permissions, an unknown project ref, a rate limit, an outage, a
+   * transport failure, or a response that does not match the documented contract.
+   *
+   * Distinct from `configuration` because the credentials were present and well formed
+   * -- the remote end refused or could not answer -- and distinct from `database`
+   * because PostgreSQL is not involved at all. An operator seeing `7` should look at
+   * their token, their project ref, or Supabase's status page; never at their
+   * connection string.
+   */
+  remote: 7,
+  /**
+   * Supabase Auth's Before User Created hook is configured, and points somewhere else.
+   *
+   * Not a failure of this tool and not a failure of the API: it is a decision only the
+   * operator can make. Replacing an authentication policy that somebody deliberately
+   * installed is exactly the kind of thing a CLI must never do on its own initiative,
+   * so the command stops and hands the choice back.
+   *
+   * Its own code because the remediation is unique. Every other non-zero exit here
+   * means "fix something and rerun"; this one means "decide whether the existing
+   * configuration should survive", and a CI job should be able to route it to a human
+   * rather than to a retry.
+   */
+  hookConflict: 8,
+  /**
+   * The remote configuration was written, and reading it back did not show the change.
+   *
+   * The single most dangerous state this tool can produce, and the reason it never
+   * treats HTTP 200 as proof. Reaching it means a mutation was accepted and the
+   * resulting configuration is not what was asked for, so nothing may be reported as
+   * successful and the operator must inspect the project before trusting it.
+   */
+  hookVerification: 9,
 } as const;
 
 export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
 
-export type ErrorKind = 'configuration' | 'database' | 'sync' | 'unexpected';
+export type ErrorKind = 'configuration' | 'database' | 'sync' | 'remote' | 'unexpected';
 
 export interface AppErrorOptions {
   /** Original error, kept for diagnostics. Never rendered for expected failures. */
@@ -130,6 +167,58 @@ export class SuspiciousUpdateError extends AppError {
 export class SyncError extends AppError {
   readonly kind = 'sync' as const;
   readonly exitCode = EXIT_CODES.sync;
+}
+
+/**
+ * The database guard layer is absent or damaged, blocking an operation that needs it.
+ *
+ * Shares `status`'s health exit code because it is the same verdict reached the same
+ * way, just acted on instead of merely reported. The `hook enable` preflight is its only
+ * thrower: activating a fail-closed hook against a broken guard layer would reject every
+ * signup on the project, so "the database says no" has to stop the command before a
+ * single byte reaches the Management API.
+ */
+export class GuardHealthError extends AppError {
+  readonly kind = 'database' as const;
+  readonly exitCode = EXIT_CODES.guardHealth;
+}
+
+/**
+ * The Supabase Management API refused, failed, or answered in a way we cannot trust.
+ *
+ * Messages built here are subject to one hard rule: **the access token never appears**.
+ * It is not in the URL, so it cannot arrive through a URL echoed into a message; it is
+ * not interpolated anywhere; and any server-supplied text is sanitised before it is
+ * shown. See `sanitizeServerMessage()` in `src/supabase/management-client.ts`.
+ */
+export class SupabaseApiError extends AppError {
+  readonly kind = 'remote' as const;
+  readonly exitCode = EXIT_CODES.remote;
+}
+
+/**
+ * The Before User Created hook is already configured, and not by us.
+ *
+ * Thrown instead of overwriting. The hook slot holds exactly one URI, so enabling ours
+ * over somebody else's silently disables their policy -- which could be the only thing
+ * standing between a project and whatever it was written to stop.
+ */
+export class AuthHookConflictError extends AppError {
+  readonly kind = 'remote' as const;
+  readonly exitCode = EXIT_CODES.hookConflict;
+}
+
+/**
+ * A write was accepted but the state read back afterwards is not the state requested.
+ *
+ * Kept apart from {@link SupabaseApiError} because the two demand opposite responses. An
+ * API error means nothing changed and the command can simply be rerun. This means
+ * something may well have changed, into a state nobody chose, and rerunning blindly is
+ * the wrong instinct -- the project's Auth configuration needs to be looked at.
+ */
+export class AuthHookVerificationError extends AppError {
+  readonly kind = 'remote' as const;
+  readonly exitCode = EXIT_CODES.hookVerification;
 }
 
 /** A bug, or an error we did not anticipate. Diagnostics are allowed here. */

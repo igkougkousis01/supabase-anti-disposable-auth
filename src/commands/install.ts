@@ -27,6 +27,7 @@ import { ConfigurationError } from '../lib/errors.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { Logger } from '../lib/logger.js';
 import { CLI_NAME, PRODUCT_NAME } from '../lib/package-info.js';
+import { BEFORE_USER_CREATED_HOOK_URI } from '../supabase/constants.js';
 
 export interface InstallDependencies {
   readonly env: NodeJS.ProcessEnv;
@@ -112,8 +113,10 @@ export function printInstallSummary(report: InstallReport, logger: Logger = defa
  *
  * `install` creates `guard.before_user_created()` and grants `supabase_auth_admin`
  * permission to run it. It does not tell Supabase Auth to call it -- that lives in
- * the Auth service's configuration, not in PostgreSQL, and this branch deliberately
- * does not automate it.
+ * the Auth service's configuration, not in PostgreSQL, and `install` deliberately does
+ * not reach for it. Activation is a separate, explicitly named command
+ * (`hook enable`), so reconfiguring a project's live authentication can never happen as
+ * a side effect of running a migration.
  *
  * So the notice is printed on every successful run, including a no-op one. An
  * operator who runs `install` twice and sees the reassuring line only the first time
@@ -123,8 +126,11 @@ function printActivationNotice(logger: Logger): void {
   logger.blank();
   logger.plain('Supabase Auth activation is still required — signups are not filtered yet.');
   logger.plain('Enable the Before User Created hook pointing at:');
-  logger.plain('  pg-functions://postgres/guard/before_user_created');
-  logger.plain('See the README for local config.toml and hosted dashboard steps.');
+  logger.plain(`  ${BEFORE_USER_CREATED_HOOK_URI}`);
+  logger.plain(
+    `On a hosted project: \`${CLI_NAME} hook enable\` (needs Management API credentials).`,
+  );
+  logger.plain('Locally: add the [auth.hook.before_user_created] block to supabase/config.toml.');
 }
 
 export function registerInstallCommand(program: Command, logger: Logger = defaultLogger): Command {

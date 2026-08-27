@@ -12,6 +12,7 @@ import { pathToFileURL } from 'node:url';
 import { Command } from 'commander';
 
 import { registerDoctorCommand } from './commands/doctor.js';
+import { registerHookCommand } from './commands/hook.js';
 import { registerInstallCommand } from './commands/install.js';
 import { registerStatusCommand } from './commands/status.js';
 import { registerSyncCommand } from './commands/sync.js';
@@ -33,6 +34,7 @@ export function buildProgram(logger: Logger = defaultLogger): Command {
     .showHelpAfterError('(run with --help to see available commands)');
 
   registerDoctorCommand(program, logger);
+  registerHookCommand(program, logger);
   registerInstallCommand(program, logger);
   registerStatusCommand(program, logger);
   registerSyncCommand(program, logger);

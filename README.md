@@ -8,21 +8,23 @@ your app, another client, or the dashboard — is covered by the same rule.
 ## Project status: early development
 
 The **database policy engine works**, `sync` keeps its blocklist current from an upstream
-source, and the **Before User Created auth hook function is installed** by `install`.
+source, `install` creates the **Before User Created auth hook function**, and
+`hook enable` **activates it** in a hosted project's Supabase Auth configuration.
 
-> **⚠️ Installing the hook function is not the same as turning protection on.**
+> **⚠️ Installing the hook function is still not the same as turning protection on.**
 > `install` creates `guard.before_user_created()` and grants `supabase_auth_admin`
 > permission to run it. It does **not** tell Supabase Auth to call it — that lives in
-> the Auth service's configuration, not in PostgreSQL, and this version does not
-> automate it. Until you [activate the hook](#activating-the-hook) yourself, no signup
-> is filtered.
+> the Auth service's configuration, not in PostgreSQL. Activation is a **separate,
+> explicitly named command**, so reconfiguring a project's live authentication can never
+> happen as a side effect of running a migration.
 >
 > ```text
 > function installed   ≠   Auth Hook enabled
+>   (install)                (hook enable, or the dashboard, or config.toml)
 > ```
 >
-> `status` reports these as two separate lines and never infers the second from the
-> first.
+> `status` reports these as separate lines and never infers one from the other. When
+> Management API credentials are absent it says **not checked** — never a tick.
 >
 > **⚠️ Sync is manual.** `pg_cron` scheduling is not implemented. The blocklist refreshes
 > when you run `sync`, and never otherwise.
@@ -40,21 +42,33 @@ guard.is_disposable_domain()      the one policy engine
       │
 guard.before_user_created(event)  the hook function — installed by `install`
       ↑
-      │  ⚠️ only after you configure Supabase to call it
+      │  ⚠️ only while Supabase Auth is configured to call it
       │
-Supabase Auth
-      ↓
-allow  {}   /   reject  {"error": {...}}
+Supabase Auth                     allow {} / reject {"error": {...}}
+      ↑
+      │  configured by
+      │
+Supabase Management API           GET/PATCH /v1/projects/{ref}/config/auth
+      ↑
+      │
+CLI: hook enable / disable / status
 ```
 
-The upward arrow from Supabase Auth is the one this tool cannot draw for you. Every
-other arrow is created by `install` and `sync`.
+Read the bottom half carefully, because it is the distinction the whole design turns on:
+
+```text
+The Management API CONFIGURES Auth.
+It does NOT execute the policy.
+```
+
+`hook enable` flips one boolean and sets one URI in a hosted project. Every signup
+decision is still made by `guard.is_disposable_domain()` inside your database, with no
+network call and no dependency on this CLI ever running again.
 
 ## Intended capabilities
 
 Planned, not yet built (see [docs/roadmap.md](docs/roadmap.md)):
 
-- Automatic hook **activation** through the Supabase Management API (manual today)
 - Optional strict PostgreSQL trigger enforcement
 - **Scheduled** blocklist refresh with `pg_cron` (manual refresh works today)
 - Safe uninstall flow with dry-run support
@@ -76,13 +90,20 @@ To run it from a clone, see [docs/development.md](docs/development.md).
 
 ## Commands
 
-| Command     | Status              | Purpose                                                      |
-| ----------- | ------------------- | ------------------------------------------------------------ |
-| `doctor`    | **Available**       | Validate the local environment and database connectivity.    |
-| `install`   | **Available**       | Create the guard schema, policy engine and hook function.    |
-| `status`    | **Available**       | Report the state of the guard schema in the target database. |
-| `sync`      | **Available**       | Refresh the disposable-domain blocklist. Manual only.        |
-| `uninstall` | Not implemented yet | Remove everything the CLI installed.                         |
+| Command        | Status              | Purpose                                                            |
+| -------------- | ------------------- | ------------------------------------------------------------------ |
+| `doctor`       | **Available**       | Validate the local environment and database connectivity.          |
+| `install`      | **Available**       | Create the guard schema, policy engine and hook function.          |
+| `status`       | **Available**       | Report the guard schema, and remote activation when credentialled. |
+| `sync`         | **Available**       | Refresh the disposable-domain blocklist. Manual only.              |
+| `hook status`  | **Available**       | Report what Supabase Auth is actually configured to call.          |
+| `hook enable`  | **Available**       | Point Supabase Auth at the guard hook and switch it on.            |
+| `hook disable` | **Available**       | Switch the guard hook off, leaving its URI in place.               |
+| `uninstall`    | Not implemented yet | Remove everything the CLI installed.                               |
+
+`doctor`, `install`, `status` and `sync` need only `SUPABASE_DB_URL`. The `hook`
+commands need Management API credentials — and `hook enable` needs both. A missing
+Management API credential never breaks a database-only command.
 
 Global flags:
 
@@ -142,7 +163,7 @@ it again to apply new migrations.
 
 `install` does **not** configure Supabase Auth, modify `auth.users`, enable `pg_cron`,
 or download anything. It creates the function the hook will call; switching the hook on
-is a separate, manual step — see [Activating the hook](#activating-the-hook).
+is a separate, explicitly named command — see [Activating the hook](#activating-the-hook).
 
 ```text
 $ supabase-anti-disposable-auth install
@@ -163,7 +184,8 @@ Database guard layer installed.
 Supabase Auth activation is still required — signups are not filtered yet.
 Enable the Before User Created hook pointing at:
   pg-functions://postgres/guard/before_user_created
-See the README for local config.toml and hosted dashboard steps.
+On a hosted project: `supabase-anti-disposable-auth hook enable` (needs Management API credentials).
+Locally: add the [auth.hook.before_user_created] block to supabase/config.toml.
 ```
 
 When everything is already applied:
@@ -505,14 +527,20 @@ all six branches of the function.
 
 ### Activating the hook
 
-**`install` does not do this.** Automating it through the Supabase Management API is
-deliberately deferred to a later branch so the database contract could be tested first.
+Activation is what makes the difference between a function sitting in your database and
+a filter running on every signup. There are two paths, and they are **not**
+interchangeable — one configures a local stack, the other configures a hosted project.
 
-The hook URI is always:
+The hook URI is always the same on both:
 
 ```text
 pg-functions://postgres/guard/before_user_created
 ```
+
+| Where                    | How                                       | This CLI         |
+| ------------------------ | ----------------------------------------- | ---------------- |
+| Local (`supabase start`) | `supabase/config.toml`                    | **documents it** |
+| Hosted project           | Supabase Management API, or the dashboard | **automates it** |
 
 #### Locally, with the Supabase CLI
 
@@ -533,24 +561,415 @@ supabase stop && supabase start
 Run `supabase-anti-disposable-auth install` against the local database **before**
 starting Auth with the hook enabled — Auth will call a function that must already exist.
 
-This tool does **not** edit your `config.toml` for you. It has no safe, explicit
-mechanism for modifying user-owned configuration files, and inventing one to save a
-four-line paste would be the wrong trade.
+This tool does **not** edit your `config.toml` for you, and `hook enable` does not touch
+it either. It has no safe, explicit mechanism for modifying user-owned configuration
+files, and inventing one to save a four-line paste would be the wrong trade. `hook
+enable` targets the **hosted** Auth configuration only; running it will not change what
+your local stack does.
 
 #### On a hosted project
 
-Supabase Dashboard → **Authentication** → **Hooks** → **Before User Created**, select
-the Postgres function `guard.before_user_created`, and enable it.
-
-#### Verifying it worked
+Either through the dashboard — **Authentication → Hooks → Before User Created**, select
+the Postgres function `guard.before_user_created`, enable it — or with one command:
 
 ```bash
-supabase-anti-disposable-auth status
+supabase-anti-disposable-auth hook enable
 ```
 
-confirms the **database** side — that the function exists and `supabase_auth_admin` can
-execute it. It cannot confirm activation, and says so. The only proof that activation
-took effect is an actual signup attempt with a blocked domain returning `403`.
+### The `hook` commands
+
+These are the only commands that talk to Supabase's servers, and the only ones that can
+change anything outside your database. They need
+[Management API credentials](#management-api-credentials).
+
+```bash
+supabase-anti-disposable-auth hook status
+supabase-anti-disposable-auth hook enable
+supabase-anti-disposable-auth hook disable
+```
+
+They configure exactly two fields of your project's Auth configuration:
+
+```json
+{
+  "hook_before_user_created_enabled": true,
+  "hook_before_user_created_uri": "pg-functions://postgres/guard/before_user_created"
+}
+```
+
+and **nothing else**. This tool does not own, manage, read out or report on any other
+Supabase Auth setting. Your SMTP configuration, OAuth providers, CAPTCHA keys, rate
+limits, session settings and every other hook are untouched by every command here.
+
+#### Management API credentials
+
+| Variable                | What it is                                                              |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `SUPABASE_PROJECT_REF`  | The 20-character id in `https://supabase.com/dashboard/project/<ref>`   |
+| `SUPABASE_ACCESS_TOKEN` | A Management API access token. **Treat as your most sensitive secret.** |
+
+Create a token at **[supabase.com/dashboard/account/tokens](https://supabase.com/dashboard/account/tokens)**.
+Prefer a fine-grained or OAuth token scoped to Auth configuration where your plan offers
+one — `GET` needs Auth-configuration read access and `PATCH` needs write access, and
+nothing here needs more than that.
+
+> **⚠️ A personal access token carries the privileges of your whole account**, across
+> every project that account can reach. That is far wider than `SUPABASE_DB_URL`, which
+> is scoped to a single database. Someone who obtains it can read and rewrite your
+> projects' configuration.
+
+**Do not put it in a shell command.**
+
+```bash
+# DON'T. This lands in ~/.zsh_history in plaintext, and in the process list
+# where any other user on the machine can read it.
+SUPABASE_ACCESS_TOKEN=sbp_... supabase-anti-disposable-auth hook enable
+```
+
+Put it in `.env` (which is gitignored), or export it from a secret manager:
+
+```bash
+export SUPABASE_ACCESS_TOKEN="$(op read op://vault/supabase/token)"
+```
+
+In CI, use the platform's masked-secret store. Never `echo` it.
+
+**What this CLI does with it**, and what it will never do:
+
+- sent **only** as `Authorization: Bearer <token>` to `https://api.supabase.com`;
+- **never** in a URL, a query string, or a path segment;
+- **never** written to a log, an error message, a file, or a process argument;
+- **never** sent to a host you can configure — the API origin is compiled in, and there
+  is no flag or variable that redirects it;
+- **redacted** out of any message Supabase itself returns, and out of any error attached
+  as a diagnostic `cause`, so even `--debug` cannot print it.
+
+Those are enforced by tests that drive every path with a sentinel token and assert it
+never appears in the output. See [SECURITY.md](SECURITY.md).
+
+#### `hook enable`
+
+Points Supabase Auth at `guard.before_user_created` and switches it on. Idempotent, and
+safe to re-run.
+
+```text
+$ supabase-anti-disposable-auth hook enable
+
+Supabase Anti-Disposable Auth
+
+✓ Database hook layer healthy (db.abcdefgh.supabase.co:5432/postgres)
+✓ Read Supabase Auth configuration (Before User Created: disabled)
+✓ Auth configuration updated
+✓ Verified by reading the configuration back
+
+✓ Before User Created hook enabled
+✓ URI verified: pg-functions://postgres/guard/before_user_created
+
+Signups are now filtered by the guard hook.
+```
+
+The order of those lines is the design:
+
+```text
+DB preflight
+   ↓
+Remote GET
+   ↓
+already correct?
+   ├── yes → no-op success, no PATCH
+   └── no
+        ↓
+      conflict? ──→ refuse, no PATCH
+        ↓
+      PATCH  (two fields only)
+        ↓
+      Remote GET
+        ↓
+      verify exact state
+```
+
+##### The database preflight
+
+**Before a single byte reaches the Management API**, `hook enable` connects to your
+database and proves the hook layer works:
+
+- the guard layer is complete and fully migrated,
+- `guard.before_user_created(jsonb)` exists,
+- `supabase_auth_admin` holds every privilege the hook needs.
+
+This is the most important check in the command, and the reason is the hook's own
+design. `guard.before_user_created()` **fails closed** — if the policy engine cannot
+answer, it rejects the signup. That is correct for a security control, and it is exactly
+what makes premature activation dangerous:
+
+> Enabling the hook against a broken guard layer does not weaken your filter. It rejects
+> **every signup on the project**.
+
+So a failed preflight stops the command with exit code `5`, and nothing is sent:
+
+```text
+✗ supabase_auth_admin cannot execute the hook: missing SELECT on guard.blocked_domains
+Every signup would be rejected. Apply the grant snippet from "Repairing the auth hook
+grants" in the README, then try again.
+```
+
+If `SUPABASE_DB_URL` is not set, `hook enable` **refuses** rather than skipping the
+check:
+
+```text
+✗ SUPABASE_DB_URL is missing, so the database hook cannot be verified before activation
+Set SUPABASE_DB_URL so the database hook can be verified first, or pass --skip-db-check
+to activate without that verification (dangerous — see `hook enable --help`).
+```
+
+Silently skipping would make the dangerous path the default for anyone who has not
+configured a database, which is precisely backwards.
+
+##### `--skip-db-check`
+
+> **⚠️ Dangerous. Opt-in only.**
+>
+> ```bash
+> supabase-anti-disposable-auth hook enable --skip-db-check
+> ```
+>
+> This activates the hook **without verifying that the database can serve it**. If
+> `guard.before_user_created` is missing, or `supabase_auth_admin` cannot execute it,
+> every signup on the project will be rejected the moment the hook goes live.
+
+It prints a warning before it mutates anything, and prints the same warning during a
+`--dry-run` — a preview whose warnings differ from the real run would teach you that the
+dangerous flag is quiet.
+
+Use it only when you genuinely cannot reach the database from where you are running the
+command and you have verified the guard layer another way.
+
+**It is not a `--force`.** It buys out of the _database_ check and nothing else. It does
+not overwrite another hook, does not ignore an API error, and does not skip post-write
+verification.
+
+##### Idempotence
+
+A project that is already correct is a success with no PATCH at all:
+
+```text
+✓ Before User Created hook already enabled
+✓ URI matches expected database function
+  pg-functions://postgres/guard/before_user_created
+
+No remote changes were needed.
+```
+
+##### Configuration conflict
+
+If the Before User Created slot already points at a **different** hook, `hook enable`
+refuses and changes nothing:
+
+```text
+✗ Before User Created is already configured to a different hook (currently enabled):
+  pg-functions://postgres/custom/existing_hook
+
+Refusing to replace it. The hook slot holds one URI, so enabling
+pg-functions://postgres/guard/before_user_created would silently disable that policy.
+Decide explicitly: remove the existing hook in the Supabase dashboard, then run
+`supabase-anti-disposable-auth hook enable` again.
+```
+
+Exit code `8`. **There is no override flag**, by design — replacing an authentication
+policy somebody deliberately installed is a decision only you can make, and it is made
+in the dashboard, not by a CLI flag.
+
+This applies **even when the other hook is disabled**. A disabled foreign hook is
+somebody's configuration in a paused state, not an empty slot; taking it would destroy
+their ability to switch it back on.
+
+Every combination is defined:
+
+| `enabled` | `uri`            | `hook enable` | `hook disable` |
+| --------- | ---------------- | ------------- | -------------- |
+| `false`   | none             | enable it     | no-op          |
+| `false`   | ours             | enable it     | no-op          |
+| `false`   | **another hook** | **conflict**  | **conflict**   |
+| `true`    | ours             | no-op         | disable it     |
+| `true`    | **another hook** | **conflict**  | **conflict**   |
+| `true`    | none             | repair it     | no-op          |
+
+If the existing hook is an HTTP endpoint, its **path and query are withheld** from the
+message — a webhook URL routinely carries a signing token, and a conflict report is not
+worth writing one into your terminal scrollback:
+
+```text
+✗ Before User Created is already configured to a different hook (currently enabled):
+  https://hooks.example.test (path and query withheld)
+```
+
+##### Post-write verification
+
+`hook enable` never treats HTTP 200 as proof. After the PATCH it reads the configuration
+back and asserts the exact expected state. If the state does not match:
+
+```text
+✗ Supabase accepted the change but the Auth configuration does not show it:
+  Before User Created is disabled with URI pg-functions://postgres/guard/before_user_created
+The project may be in an unintended state — do not assume the enable succeeded.
+Check Authentication -> Hooks in the Supabase dashboard before relying on it.
+```
+
+Exit code `9`, and nothing is reported as successful. A partially applied update, a
+server-side normalisation, a competing change from the dashboard, or a plan-tier rule
+that declines part of a patch would all look like success without this read-back.
+
+##### What it sends
+
+Exactly two fields:
+
+```json
+{
+  "hook_before_user_created_enabled": true,
+  "hook_before_user_created_uri": "pg-functions://postgres/guard/before_user_created"
+}
+```
+
+It deliberately does **not** GET the whole Auth configuration and PATCH it back. Doing
+so would rewrite every unrelated setting with values that were already stale by the time
+they were sent — including secrets the API may return in redacted form, which would then
+be written back redacted.
+
+#### `hook disable`
+
+Switches the guard hook off. It **only ever touches the hook it installed**.
+
+```text
+$ supabase-anti-disposable-auth hook disable
+
+Supabase Anti-Disposable Auth
+
+✓ Read Supabase Auth configuration (Before User Created: enabled)
+✓ Auth configuration updated
+✓ Verified by reading the configuration back
+
+✓ Before User Created hook disabled
+✓ URI left in place: pg-functions://postgres/guard/before_user_created
+
+Signups are no longer filtered. The database objects are untouched —
+it is now safe to remove them if that is what you intended.
+```
+
+**The URI is deliberately left in place.** The Management API's update body makes every
+field optional, so `disable` sends only:
+
+```json
+{ "hook_before_user_created_enabled": false }
+```
+
+That is the least destructive change that achieves the goal. It also keeps the
+configuration explicit: your project still records which function the hook points at,
+`hook enable` can switch it back on without re-deriving anything, and the dashboard
+shows what was disabled rather than an empty field that says nothing. "Turn it off" does
+not imply "forget what it was".
+
+**`hook disable` performs no database preflight**, and has no `--skip-db-check`. That is
+deliberate: turning our own hook off cannot point Auth at anything broken, and requiring
+database credentials to switch a hook **off** would strand you exactly when you need it
+most — when the fail-closed hook is rejecting every signup and your database is
+unreachable.
+
+If the slot belongs to another hook, it refuses:
+
+```text
+✗ Before User Created is configured to a different hook (currently enabled):
+  pg-functions://postgres/custom/existing_hook
+Refusing to touch it. This tool only disables the hook it installed; that
+configuration belongs to something else.
+```
+
+#### `hook status`
+
+Read-only. Reports what Supabase Auth is actually configured to do.
+
+```text
+$ supabase-anti-disposable-auth hook status
+
+Supabase Anti-Disposable Auth
+
+Project
+✓ Connected to the Supabase Management API (project abcdefghijklmnopqrst)
+
+Before User Created
+✓ Enabled
+✓ URI: pg-functions://postgres/guard/before_user_created
+```
+
+Or:
+
+```text
+Before User Created
+○ Disabled
+  Configured URI: pg-functions://postgres/guard/before_user_created
+  Run `supabase-anti-disposable-auth hook enable` to switch it on.
+```
+
+Or:
+
+```text
+Before User Created
+✗ Conflict
+  Another Before User Created hook is configured: pg-functions://postgres/custom/existing_hook
+  It is currently enabled.
+  This tool will not change it. Expected: pg-functions://postgres/guard/before_user_created
+```
+
+A disabled hook exits `0` — it is a fact about your project, not a failure of the
+command. A conflict exits `8`.
+
+The report prints one flag and one URI. It never dumps the Auth configuration document,
+because that document contains SMTP passwords, OAuth client secrets and SMS provider
+tokens that this tool has no reason to read and every reason not to print.
+
+#### Dry run
+
+Both mutating commands support `--dry-run`:
+
+```bash
+supabase-anti-disposable-auth hook enable --dry-run
+supabase-anti-disposable-auth hook disable --dry-run
+```
+
+A dry run validates configuration, performs the database preflight (unless explicitly
+skipped), reads the remote configuration, works out what it would do, and **sends zero
+PATCH requests**.
+
+```text
+$ supabase-anti-disposable-auth hook enable --dry-run
+
+Supabase Anti-Disposable Auth
+
+Dry run
+
+✓ Database hook layer healthy (db.abcdefgh.supabase.co:5432/postgres)
+✓ Read Supabase Auth configuration (Before User Created: disabled)
+
+Current:
+  Before User Created: disabled (no URI configured)
+
+Would set:
+  hook_before_user_created_enabled: true
+  hook_before_user_created_uri: pg-functions://postgres/guard/before_user_created
+
+No remote changes made.
+```
+
+A dry run fails in exactly the same places a real run would — a broken guard layer and a
+configuration conflict both stop it — so a dry run that succeeds is a genuine prediction
+rather than an optimistic one.
+
+#### Is there a confirmation prompt?
+
+No, and that is deliberate. `hook enable` is already an explicitly named mutation
+command, `--dry-run` gives you a preview whenever you want one, and a prompt would make
+the command awkward to run from CI for no real safety gain. The protections that matter
+here are structural — the preflight, the conflict refusal, and the post-write
+verification — not a keystroke.
 
 ### Troubleshooting
 
@@ -559,7 +978,11 @@ took effect is an actual signup attempt with a blocked domain returning `403`.
 | Every signup fails with 503                                           | `supabase_auth_admin` is missing a grant, or a guard object was dropped                                                               | `status` names the exact missing privilege or object                                    |
 | `status` reports missing grants, `install` says "up to date"          | 007 ran before `supabase_auth_admin` existed and is recorded as applied, so it is never replayed                                      | See [Repairing the auth hook grants](#repairing-the-auth-hook-grants)                   |
 | Every signup fails with 503 and the logs say "malformed hook payload" | Something is sending a non-string `user.email` — a hook wired to the wrong extensibility point, or a caller that is not Supabase Auth | Check which hook the Auth config points at; the server log names the JSON type received |
-| Disposable signups still succeed                                      | The hook is installed but **not activated**                                                                                           | See [Activating the hook](#activating-the-hook)                                         |
+| Disposable signups still succeed                                      | The hook is installed but **not activated**                                                                                           | `hook status` says so in one line; `hook enable` fixes it                               |
+| `hook enable` refuses with a conflict                                 | Another Before User Created hook is already configured                                                                                | Remove it in the dashboard first — this tool will not replace a policy you installed    |
+| `hook enable` refuses with exit `5`                                   | The database preflight failed: broken guard layer, or missing `supabase_auth_admin` grants                                            | Fix the database first. The message names the exact object or privilege                 |
+| `hook enable` exits `9` after a PATCH                                 | Supabase accepted the change but reading it back showed a different state                                                             | Check Authentication → Hooks in the dashboard; do not assume the change applied         |
+| `hook` commands exit `7` with a 403                                   | Token lacks Auth-configuration write access, or the project's plan declines the change                                                | The hint carries Supabase's own message                                                 |
 | Signup fails with a raw `function ... does not exist`                 | Auth is configured for a hook the database does not have                                                                              | Run `install`, or correct the URI                                                       |
 | Signup fails with a 500 and no message                                | The hook exceeded Supabase's 2-second timeout                                                                                         | Check for lock contention on `guard.blocked_domains` during a `sync`                    |
 | Phone or anonymous signups are blocked                                | Not caused by this tool — it allows every email-less signup by design                                                                 | Check other hooks and your own validation                                               |
@@ -571,18 +994,30 @@ message is generic on purpose.
 
 Order matters, and getting it wrong breaks signups:
 
-1. **Disable the Auth Hook in Supabase first** (dashboard, or remove the `config.toml`
-   block and restart).
-2. **Then** drop the database function and revoke the grants.
+```bash
+# 1. Stop Supabase Auth calling the function.
+supabase-anti-disposable-auth hook disable
+
+# 2. Only then remove the database objects.
+```
+
+On a local stack, step 1 is removing the `[auth.hook.before_user_created]` block from
+`config.toml` and restarting.
 
 Doing it the other way round leaves Supabase Auth calling a function that no longer
-exists, and every signup fails until the configuration catches up. Full `uninstall` is
-not implemented yet — see [docs/roadmap.md](docs/roadmap.md).
+exists, and **every signup fails** until the configuration catches up. This is why
+`hook disable` needs no database access at all: the step that stops the bleeding must
+work even when the database does not.
+
+Full `uninstall` is not implemented yet — see [docs/roadmap.md](docs/roadmap.md).
 
 ### `status`
 
-Read-only. Reports the database layer, and reports everything that is not built as not
-configured rather than hiding it.
+Read-only. Reports the database layer, and — when Management API credentials are present
+— whether Supabase Auth is actually calling the hook. Everything that is not built is
+reported as not configured rather than hidden.
+
+With credentials, on a fully protected project:
 
 ```text
 $ supabase-anti-disposable-auth status
@@ -602,18 +1037,68 @@ Guard schema
 Before User Created Hook
 ✓ Function installed: guard.before_user_created(jsonb)
 ✓ Grants: supabase_auth_admin can execute the hook
-○ Supabase activation not verified (configure the hook in Supabase)
+✓ Activated in Supabase Auth
+✓ Auth hook URI: pg-functions://postgres/guard/before_user_created
 
 Automatic sync
 ○ Not configured (not implemented yet)
 
-Database guard layer is up to date.
+Active protection: the guard layer is healthy and Supabase Auth calls it.
+Signups are filtered.
 ```
 
-The hook's two lines are independent facts and the second is never inferred from the
-first. `status` can see the function and the grants because they live in PostgreSQL; it
-cannot see the Supabase Auth configuration, which does not. So activation is reported as
-**not verified** — a hollow marker, never a tick.
+Without them, the remote line is hollow — never a tick, and never inferred from the
+database lines above it:
+
+```text
+Before User Created Hook
+✓ Function installed: guard.before_user_created(jsonb)
+✓ Grants: supabase_auth_admin can execute the hook
+○ Remote activation not checked (set SUPABASE_PROJECT_REF and SUPABASE_ACCESS_TOKEN)
+
+...
+Database guard layer is up to date. Whether Supabase Auth calls the guard
+hook was not checked, so nothing here confirms any signup reaches it.
+```
+
+A missing Management API credential **never** turns a database-only `status` into an
+error. But if you supply credentials and the check fails, that is reported honestly
+rather than downgraded to "not checked":
+
+```text
+✗ Remote activation check failed: Supabase rejected the Management API access token
+  The token is missing, expired or revoked. Create a new one at
+  https://supabase.com/dashboard/account/tokens and set SUPABASE_ACCESS_TOKEN.
+```
+
+The three hook lines are independent facts. The function and the grants live in
+PostgreSQL; activation lives in the Auth service. `status` reads each from the system
+that owns it, and never infers one from another.
+
+#### What counts as protected
+
+| Database   | Supabase Auth        | Verdict                                                | Exit |
+| ---------- | -------------------- | ------------------------------------------------------ | ---- |
+| healthy    | hook active          | **Active protection.** Signups are filtered.           | `0`  |
+| healthy    | hook disabled        | Installed, **not protecting**. Nothing checks signups. | `0`  |
+| healthy    | another hook         | **Conflict.** Not filtered by this tool.               | `8`  |
+| healthy    | not checked          | Unknown. Nothing claims protection.                    | `0`  |
+| healthy    | check failed         | Unknown, and you were told why.                        | `7`  |
+| **broken** | **hook active**      | **DANGEROUS — signups are being rejected now.**        | `5`  |
+| broken     | disabled/not checked | Broken, but signups still work.                        | `5`  |
+
+That second-to-last row is the one that matters most, and `status` shouts about it:
+
+```text
+✗ DANGER: the hook is ACTIVE in Supabase Auth and the database layer is broken.
+The hook fails closed, so signups on this project are being rejected now.
+Either repair the guard layer, or run `supabase-anti-disposable-auth hook disable` to stop the
+rejections while you do — disabling first is the safe order.
+```
+
+A healthy database whose hook is simply switched off exits `0`, not because it is
+protected, but because it is a documented, deliberate state rather than a fault — and
+the report says so in plain words on the last line.
 
 On a plain PostgreSQL database the grant line reads:
 
@@ -664,13 +1149,20 @@ them.
 `status` exits non-zero when the guard layer is not healthy, so it can be used directly
 in CI or a deployment gate:
 
-| Situation                            | Exit code                      |
-| ------------------------------------ | ------------------------------ |
-| Complete installation                | `0`                            |
-| Not installed                        | `5` (guard health)             |
-| Incomplete or damaged installation   | `5` (guard health)             |
-| `SUPABASE_DB_URL` missing or invalid | `2` (configuration, unchanged) |
-| Database unreachable or query failed | `3` (database, unchanged)      |
+| Situation                                   | Exit code                      |
+| ------------------------------------------- | ------------------------------ |
+| Complete installation                       | `0`                            |
+| Complete installation, hook not activated   | `0`                            |
+| Not installed                               | `5` (guard health)             |
+| Incomplete or damaged installation          | `5` (guard health)             |
+| Another Before User Created hook configured | `8` (hook conflict)            |
+| Remote check supplied but failed            | `7` (remote API)               |
+| `SUPABASE_DB_URL` missing or invalid        | `2` (configuration, unchanged) |
+| Database unreachable or query failed        | `3` (database, unchanged)      |
+
+Precedence, most-certain verdict first: a definite database failure (`5`) outranks a
+definite remote finding (`8`), which outranks "we were asked to check and could not"
+(`7`).
 
 ```bash
 supabase-anti-disposable-auth status || echo "guard layer needs attention"
@@ -860,15 +1352,18 @@ migrations.
 
 ### Exit codes
 
-| Code | Meaning                                                  |
-| ---- | -------------------------------------------------------- |
-| `0`  | Success                                                  |
-| `1`  | Unexpected error (a bug)                                 |
-| `2`  | Configuration error                                      |
-| `3`  | Database connection or query error                       |
-| `4`  | Command is not implemented yet                           |
-| `5`  | Guard layer is absent or damaged (`status` health check) |
-| `6`  | Blocklist sync failed (provider, payload or safety)      |
+| Code | Meaning                                                                     |
+| ---- | --------------------------------------------------------------------------- |
+| `0`  | Success                                                                     |
+| `1`  | Unexpected error (a bug)                                                    |
+| `2`  | Configuration error                                                         |
+| `3`  | Database connection or query error                                          |
+| `4`  | Command is not implemented yet                                              |
+| `5`  | Guard layer is absent or damaged (`status`, or a failed preflight)          |
+| `6`  | Blocklist sync failed (provider, payload or safety)                         |
+| `7`  | Supabase Management API failure (auth, permission, ref, rate limit, outage) |
+| `8`  | Before User Created is configured to a different hook                       |
+| `9`  | A remote change was accepted but did not take effect                        |
 
 Code `5` is deliberately distinct from `3`. A CI job needs to tell "I could not reach
 the database" apart from "I reached it, and the guard layer is not installed" — so a
@@ -880,20 +1375,43 @@ failure is outside the database entirely — an unreachable upstream, a truncate
 download, or a candidate that failed its safety checks. An operator seeing `3` should
 look at their connection string; an operator seeing `6` should look at the provider.
 
+Codes `7`, `8` and `9` cover the three genuinely different ways a remote operation ends
+badly, and they are separated because the response to each is different:
+
+- **`7`** — the API refused or could not answer. **Nothing changed.** Fix the token, the
+  project ref, or wait for Supabase, then rerun.
+- **`8`** — someone else's hook is in the slot. **Nothing changed, and nothing should
+  change** until a human decides whether that policy is safe to remove. A CI job should
+  route this to a person, not to a retry.
+- **`9`** — a change was accepted and the state read back is wrong. **Something may well
+  have changed**, into a state nobody chose. Rerunning blindly is the wrong instinct;
+  look at the project.
+
+Missing credentials remain `2`, a database health problem remains `5`. Those five
+outcomes are never conflated.
+
 ## Environment variables
 
-| Variable          | Required            | Description                                            |
-| ----------------- | ------------------- | ------------------------------------------------------ |
-| `SUPABASE_DB_URL` | For database access | PostgreSQL connection string for your Supabase project |
+| Variable                | Required by                                          | Description                                            |
+| ----------------------- | ---------------------------------------------------- | ------------------------------------------------------ |
+| `SUPABASE_DB_URL`       | `doctor`, `install`, `status`, `sync`, `hook enable` | PostgreSQL connection string for your Supabase project |
+| `SUPABASE_PROJECT_REF`  | `hook *`; optional for `status`                      | The 20-character project ref from your dashboard URL   |
+| `SUPABASE_ACCESS_TOKEN` | `hook *`; optional for `status`                      | Management API access token. **Highest-value secret.** |
 
-Copy [.env.example](.env.example) to `.env` and fill it in, or export the variable in
+Configuration is validated in one place and required **per command**. A missing
+Management API credential never breaks a database-only command, and a missing
+`SUPABASE_DB_URL` never breaks `hook disable` or `hook status`.
+
+Copy [.env.example](.env.example) to `.env` and fill it in, or export the variables in
 your shell. A `.env` file in the working directory is loaded automatically; real
 environment variables take precedence.
 
 Keep `sslmode=require` in the connection string. The tool never weakens TLS settings on
 your behalf.
 
-No Supabase Management API token is required at this stage.
+`SUPABASE_ACCESS_TOKEN` is the most sensitive value this tool handles — read
+[Management API credentials](#management-api-credentials) before you set it, and do not
+put it in a shell command where your history file will keep it.
 
 ## Development
 
@@ -922,6 +1440,12 @@ This is a security tool, so it holds itself to the same standard it enforces:
   `.env.example` belongs in version control.
 - Connection strings are never logged. Databases are referred to by
   `host:port/database` only.
+- **The Management API token leaves the process only as an `Authorization: Bearer`
+  header, to a compiled-in HTTPS origin.** Never in a URL, never in a log, never in an
+  error, never on disk, never as a process argument, and never to a host you can
+  configure. It is redacted out of messages Supabase itself returns and out of any
+  diagnostic `cause`, so even `--debug` cannot print it — asserted by tests that drive
+  every path with a sentinel token.
 - Values sent to PostgreSQL are bound as query parameters, never string-concatenated.
   Migration files are static SQL that ships with the package; no user input is ever
   interpolated into them.
@@ -939,10 +1463,24 @@ This is a security tool, so it holds itself to the same standard it enforces:
   or passed to a shell.
 - A failed sync never destroys the last known-good blocklist. Stale-but-known-good beats
   fresh-but-wrong.
+- **Remote Auth configuration is never overwritten blindly.** A Before User Created hook
+  that is not ours is reported as a conflict and left alone, enabled or not. Writes carry
+  only this feature's two fields, never a round-tripped copy of your whole Auth
+  configuration. Every write is proven by reading the state back, and a mismatch is a
+  non-zero exit rather than a success message.
+- **Supabase Auth is never pointed at a database hook known to be broken.** `hook enable`
+  proves the guard layer works before it sends anything, because the hook fails closed
+  and premature activation would reject every signup on the project.
+
+This tool claims **no ownership of any other Supabase Auth setting**. It reads two
+fields and writes two fields. Your SMTP configuration, OAuth providers, CAPTCHA keys,
+rate limits, session settings and every other hook are outside its remit and are never
+modified, and never printed.
 
 Per-concern breakdowns are in
-[docs/architecture.md](docs/architecture.md#database-threat-model) and
-[docs/architecture.md](docs/architecture.md#synchronisation-threat-model).
+[docs/architecture.md](docs/architecture.md#database-threat-model),
+[docs/architecture.md](docs/architecture.md#synchronisation-threat-model) and
+[docs/architecture.md](docs/architecture.md#hook-activation-threat-model).
 
 Vulnerability reports: see [SECURITY.md](SECURITY.md).
 

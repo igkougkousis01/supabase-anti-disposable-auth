@@ -15,8 +15,19 @@ import {
   DatabaseQueryError,
   EXIT_CODES,
 } from '../../src/lib/errors.js';
+import type { ManagementClient } from '../../src/supabase/management-client.js';
 import { FakeDatabase } from '../helpers/database.js';
 import { createRecordingLogger } from '../helpers/logger.js';
+import {
+  authConfigResponse,
+  errorResponse,
+  foreign,
+  managementApiDouble,
+  ours,
+  SENTINEL_TOKEN,
+  TEST_PROJECT_REF,
+  unconfigured,
+} from '../helpers/management-api.js';
 
 const PASSWORD = 'hunter2';
 const DB_URL = `postgresql://postgres:${PASSWORD}@db.example.supabase.co:5432/postgres?sslmode=require`;
@@ -340,7 +351,7 @@ describe('printing the hook section', () => {
     expect(output()).toContain('Before User Created Hook');
     expect(output()).toContain('Function installed: guard.before_user_created(jsonb)');
     expect(output()).toContain('supabase_auth_admin can execute the hook');
-    expect(output()).toContain('Supabase activation not verified');
+    expect(output()).toContain('Remote activation not checked');
   });
 
   it('says the grants were not checked on a non-Supabase server', async () => {
@@ -386,7 +397,7 @@ describe('printing the hook section', () => {
 
     expect(output()).toContain('Before User Created Hook');
     expect(output()).toContain('Function not installed');
-    expect(output()).toContain('Supabase activation not verified');
+    expect(output()).toContain('Remote activation not checked');
   });
 });
 
@@ -422,7 +433,7 @@ describe('printStatusReport', () => {
     // The function exists and the grants are in place -- the most favourable state
     // this branch can reach -- and it still must not read as "you are protected".
     expect(output()).toContain('Function installed: guard.before_user_created(jsonb)');
-    expect(output()).toContain('Supabase activation not verified');
+    expect(output()).toContain('Remote activation not checked');
     expect(output()).not.toMatch(/hook (is )?(active|enabled|configured)\b/i);
     expect(output()).not.toMatch(/signups? (are|is) (now )?(protected|filtered|blocked)/i);
   });
@@ -658,5 +669,202 @@ describe('status exit codes', () => {
         runStatus({ env: { SUPABASE_DB_URL: DB_URL }, connect, files: FILES }),
       ).rejects.toBeInstanceOf(DatabaseConnectionError);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remote activation
+// ---------------------------------------------------------------------------
+
+describe('status — remote activation', () => {
+  const REMOTE_ENV = {
+    SUPABASE_DB_URL: DB_URL,
+    SUPABASE_PROJECT_REF: TEST_PROJECT_REF,
+    SUPABASE_ACCESS_TOKEN: SENTINEL_TOKEN,
+  };
+
+  async function statusWithRemote(database: FakeDatabase, api: { client: ManagementClient }) {
+    return runStatus({
+      env: REMOTE_ENV,
+      connect: async () => database,
+      files: FILES,
+      client: api.client,
+    });
+  }
+
+  it('does not check the API when no credentials are supplied', async () => {
+    // The rule that keeps every existing database-only workflow working untouched.
+    const api = managementApiDouble([authConfigResponse(ours(true))]);
+
+    const report = await runStatus({
+      env: { SUPABASE_DB_URL: DB_URL },
+      connect: async () => supabaseDatabase(),
+      files: FILES,
+    });
+
+    expect(report.remote.kind).toBe('not-checked');
+    expect(api.requests).toHaveLength(0);
+  });
+
+  it('does not check the API when only the project ref is supplied', async () => {
+    const report = await runStatus({
+      env: { SUPABASE_DB_URL: DB_URL, SUPABASE_PROJECT_REF: TEST_PROJECT_REF },
+      connect: async () => supabaseDatabase(),
+      files: FILES,
+    });
+
+    expect(report.remote.kind).toBe('not-checked');
+  });
+
+  it('reports a verified active hook', async () => {
+    const api = managementApiDouble([authConfigResponse(ours(true))]);
+    const { logger, output } = createRecordingLogger();
+
+    const report = await statusWithRemote(supabaseDatabase(), api);
+    printStatusReport(report, logger);
+
+    expect(report.remote.kind).toBe('active');
+    expect(output()).toContain('Activated in Supabase Auth');
+    expect(output()).toContain('Active protection');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.success);
+  });
+
+  it('reports a configured-but-disabled hook as not activated', async () => {
+    const api = managementApiDouble([authConfigResponse(ours(false))]);
+    const { logger, output } = createRecordingLogger();
+
+    const report = await statusWithRemote(supabaseDatabase(), api);
+    printStatusReport(report, logger);
+
+    expect(report.remote.kind).toBe('inactive');
+    expect(output()).toContain('Not activated in Supabase Auth');
+    // A healthy database whose hook is simply off is a documented state, not a failure:
+    // making it non-zero would break every existing database-only health check.
+    expect(statusExitCode(report)).toBe(EXIT_CODES.success);
+  });
+
+  it('reports an entirely unconfigured slot as not activated', async () => {
+    const api = managementApiDouble([authConfigResponse(unconfigured())]);
+    const { logger, output } = createRecordingLogger();
+
+    const report = await statusWithRemote(supabaseDatabase(), api);
+    printStatusReport(report, logger);
+
+    expect(report.remote.kind).toBe('inactive');
+    expect(output()).toContain('no hook configured');
+  });
+
+  it('reports a foreign hook as a conflict, and exits non-zero', async () => {
+    const api = managementApiDouble([authConfigResponse(foreign(true))]);
+    const { logger, output } = createRecordingLogger();
+
+    const report = await statusWithRemote(supabaseDatabase(), api);
+    printStatusReport(report, logger);
+
+    expect(report.remote.kind).toBe('conflict');
+    expect(output()).toContain('Conflict');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.hookConflict);
+  });
+
+  it('reports an API failure honestly rather than as "not checked"', async () => {
+    // Credentials were supplied, so the operator asked the question. Downgrading a
+    // revoked token to "not checked" would make it indistinguishable from an ordinary
+    // database-only run.
+    const api = managementApiDouble([errorResponse(401)]);
+    const { logger, output } = createRecordingLogger();
+
+    const report = await statusWithRemote(supabaseDatabase(), api);
+    printStatusReport(report, logger);
+
+    expect(report.remote.kind).toBe('failed');
+    expect(output()).toContain('Remote activation check failed');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.remote);
+  });
+
+  it('still prints the whole database report when the API fails', async () => {
+    const api = managementApiDouble([errorResponse(500)]);
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusWithRemote(supabaseDatabase(), api), logger);
+
+    expect(output()).toContain('Guard schema');
+    expect(output()).toContain('Blocked domains: 3');
+  });
+
+  it('never dumps the Auth configuration document', async () => {
+    const api = managementApiDouble([authConfigResponse(ours(true))]);
+    const { logger, output } = createRecordingLogger();
+
+    printStatusReport(await statusWithRemote(supabaseDatabase(), api), logger);
+
+    expect(output()).not.toContain('UNRELATED_SMTP_PASSWORD');
+    expect(output()).not.toContain('UNRELATED_HOOK_SECRET');
+  });
+
+  it('is read-only against the API', async () => {
+    const api = managementApiDouble([authConfigResponse(ours(true))]);
+
+    await statusWithRemote(supabaseDatabase(), api);
+
+    expect(api.patches()).toHaveLength(0);
+  });
+});
+
+describe('status — the dangerous combination', () => {
+  const REMOTE_ENV = {
+    SUPABASE_DB_URL: DB_URL,
+    SUPABASE_PROJECT_REF: TEST_PROJECT_REF,
+    SUPABASE_ACCESS_TOKEN: SENTINEL_TOKEN,
+  };
+
+  it('shouts when the hook is active and the database layer is broken', async () => {
+    // The one status combination where the project is broken right now: the hook fails
+    // closed, so Auth is rejecting every signup while the guard layer cannot answer.
+    const api = managementApiDouble([authConfigResponse(ours(true))]);
+    const { logger, output } = createRecordingLogger();
+
+    const report = await runStatus({
+      env: REMOTE_ENV,
+      connect: async () => damagedDatabase('guard.blocked_domains'),
+      files: FILES,
+      client: api.client,
+    });
+    printStatusReport(report, logger);
+
+    expect(output()).toContain('DANGER');
+    expect(output()).toContain('rejected');
+    expect(output()).toContain('hook disable');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.guardHealth);
+  });
+
+  it('does not shout when the same database is broken but the hook is off', async () => {
+    // Unprotected, not broken. Signups still work; the difference matters.
+    const api = managementApiDouble([authConfigResponse(ours(false))]);
+    const { logger, output } = createRecordingLogger();
+
+    const report = await runStatus({
+      env: REMOTE_ENV,
+      connect: async () => damagedDatabase('guard.blocked_domains'),
+      files: FILES,
+      client: api.client,
+    });
+    printStatusReport(report, logger);
+
+    expect(output()).not.toContain('DANGER');
+    expect(statusExitCode(report)).toBe(EXIT_CODES.guardHealth);
+  });
+
+  it('prefers the definite database verdict over an unfinished remote check', async () => {
+    // Precedence: a definite failure outranks "we could not find out".
+    const api = managementApiDouble([errorResponse(500)]);
+
+    const report = await runStatus({
+      env: REMOTE_ENV,
+      connect: async () => damagedDatabase('guard.blocked_domains'),
+      files: FILES,
+      client: api.client,
+    });
+
+    expect(statusExitCode(report)).toBe(EXIT_CODES.guardHealth);
   });
 });

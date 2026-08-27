@@ -85,9 +85,25 @@ export {
   type InstallReport,
 } from './commands/install.js';
 export {
+  hookStatusExitCode,
+  printHookMutationReport,
+  printHookStatusReport,
+  runDatabasePreflight,
+  runHookDisable,
+  runHookEnable,
+  runHookStatus,
+  type HookCommandOptions,
+  type HookDependencies,
+  type HookEvents,
+  type HookMutationReport,
+  type HookPreflightReport,
+  type HookStatusReport,
+} from './commands/hook.js';
+export {
   printStatusReport,
   runStatus,
   statusExitCode,
+  type RemoteActivation,
   type StatusDependencies,
   type StatusReport,
 } from './commands/status.js';
@@ -95,11 +111,13 @@ export {
   isSupportedNodeVersion,
   loadConfig,
   loadEnvFileIfPresent,
+  requireDatabaseUrl,
+  requireManagementCredentials,
   KNOWN_ENVIRONMENT_VARIABLES,
   MINIMUM_NODE_VERSION,
   MINIMUM_NODE_VERSION_LABEL,
 } from './config/env.js';
-export type { AppConfig, NodeVersionRequirement } from './config/types.js';
+export type { AppConfig, ManagementCredentials, NodeVersionRequirement } from './config/types.js';
 export { createPostgresConnection, PostgresClient, readServerVersion } from './database/client.js';
 export {
   calculateChecksum,
@@ -134,6 +152,8 @@ export type {
 } from './database/types.js';
 export {
   AppError,
+  AuthHookConflictError,
+  AuthHookVerificationError,
   BlocklistFetchError,
   BlocklistValidationError,
   ConfigurationError,
@@ -141,8 +161,10 @@ export {
   DatabaseQueryError,
   EXIT_CODES,
   formatErrorForUser,
+  GuardHealthError,
   isAppError,
   MigrationError,
+  SupabaseApiError,
   SuspiciousUpdateError,
   SyncError,
   toAppError,
@@ -151,7 +173,36 @@ export {
   type ExitCode,
 } from './lib/errors.js';
 export { createLogger, logger, type Logger, type LogLevel } from './lib/logger.js';
-export { describeConnectionTarget } from './lib/redact.js';
+export { describeConnectionTarget, describeHookUri, sanitizeForDisplay } from './lib/redact.js';
+export {
+  getBeforeUserCreatedHookState,
+  planHookChange,
+  readHookState,
+  verifyHookState,
+} from './supabase/auth-config.js';
+export {
+  ACCEPTED_CONTENT_TYPES,
+  AUTH_CONFIG_PATH_SEGMENTS,
+  BEFORE_USER_CREATED_HOOK_URI,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MANAGEMENT_API_BASE_URL,
+  MAX_SERVER_MESSAGE_LENGTH,
+  PROJECT_REF_LENGTH,
+  PROJECT_REF_PATTERN,
+} from './supabase/constants.js';
+export {
+  ManagementClient,
+  type AuthConfigDocument,
+  type ManagementClientOptions,
+} from './supabase/management-client.js';
+export type {
+  BeforeUserCreatedHookPatch,
+  BeforeUserCreatedHookState,
+  HookIntent,
+  HookPlan,
+  HookPlanAction,
+} from './supabase/types.js';
 export {
   CLI_NAME,
   getPackageVersion,

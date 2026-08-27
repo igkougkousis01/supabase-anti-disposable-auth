@@ -493,9 +493,13 @@ describeIfConfigured('guard schema against a live database', () => {
     it('exits zero only while the installation is complete', async () => {
       const status = await readGuardSchemaStatus(connection);
 
-      expect(statusExitCode({ target: connection.target, schema: status })).toBe(
-        EXIT_CODES.success,
-      );
+      expect(
+        statusExitCode({
+          target: connection.target,
+          schema: status,
+          remote: { kind: 'not-checked' },
+        }),
+      ).toBe(EXIT_CODES.success);
     });
 
     it('exits with the guard-health code against a really damaged schema', async () => {
@@ -505,9 +509,13 @@ describeIfConfigured('guard schema against a live database', () => {
 
         const status = await readGuardSchemaStatus(connection);
 
-        expect(statusExitCode({ target: connection.target, schema: status })).toBe(
-          EXIT_CODES.guardHealth,
-        );
+        expect(
+          statusExitCode({
+            target: connection.target,
+            schema: status,
+            remote: { kind: 'not-checked' },
+          }),
+        ).toBe(EXIT_CODES.guardHealth);
       } finally {
         await connection.execute('rollback');
       }

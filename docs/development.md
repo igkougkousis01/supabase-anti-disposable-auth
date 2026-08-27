@@ -40,6 +40,39 @@ You can also skip the file entirely:
 SUPABASE_DB_URL="postgresql://..." npm run dev -- doctor
 ```
 
+### Management API credentials
+
+The `hook` commands need two more variables:
+
+```bash
+SUPABASE_PROJECT_REF=abcdefghijklmnopqrst
+SUPABASE_ACCESS_TOKEN=sbp_...
+```
+
+`SUPABASE_ACCESS_TOKEN` is the most sensitive value in the project. A personal access
+token carries the privileges of your whole Supabase account across every project it can
+reach — much wider than `SUPABASE_DB_URL`, which is scoped to one database.
+
+**Do not put it on a command line**, even for a quick test:
+
+```bash
+# DON'T. This lands in ~/.zsh_history and in the process list.
+SUPABASE_ACCESS_TOKEN=sbp_... npm run dev -- hook status
+```
+
+Put it in `.env`, or export it from a secret manager:
+
+```bash
+export SUPABASE_ACCESS_TOKEN="$(op read op://vault/supabase/token)"
+npm run dev -- hook status
+```
+
+These variables are optional at load time. Configuration is validated centrally in
+`src/config/env.ts` and required **per command** by `requireDatabaseUrl()` and
+`requireManagementCredentials()`, so a database-only workflow never fails because a token
+it does not use is unset — and `hook disable` never fails because a database it does not
+need is unreachable.
+
 ## Local development
 
 Run the CLI from source without building:
@@ -74,14 +107,15 @@ live upstream dataset.
 unless the relevant variable is set, which keeps `npm test` and CI offline by default.
 CI never requires Supabase credentials.
 
-There are four, and the distinction between the variables matters:
+There are five, and the distinction between the variables matters:
 
-| Variable           | Used by                  | Effect on the database                                                            |
-| ------------------ | ------------------------ | --------------------------------------------------------------------------------- |
-| `SUPABASE_DB_URL`  | `database.test.ts`       | Read-only: connects and reads `server_version`.                                   |
-| `SADA_TEST_DB_URL` | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                     |
-| `SADA_TEST_DB_URL` | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly. |
-| `SADA_TEST_DB_URL` | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.   |
+| Variable                                                             | Used by                  | Effect                                                                              |
+| -------------------------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------- |
+| `SUPABASE_DB_URL`                                                    | `database.test.ts`       | Read-only: connects and reads `server_version`.                                     |
+| `SADA_TEST_DB_URL`                                                   | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                       |
+| `SADA_TEST_DB_URL`                                                   | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly.   |
+| `SADA_TEST_DB_URL`                                                   | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.     |
+| `SADA_TEST_SUPABASE_PROJECT_REF` + `SADA_TEST_SUPABASE_ACCESS_TOKEN` | `management-api.test.ts` | **Read-only**: one `GET` of a hosted project's Auth configuration. Changes nothing. |
 
 > **⚠️ These three run `drop schema if exists guard cascade`.**
 > They create the schema from scratch, exercise it, and drop it again. Nothing outside
@@ -147,6 +181,43 @@ boundary tests, or let those tests skip.
 CI does not create these roles, so CI runs the portable subset. Verify the role-based
 tests locally before landing a change to the hook or its permissions.
 
+#### Management API tests
+
+**No unit test touches the network.** `fetch` is injected into `ManagementClient`, and
+`tests/helpers/management-api.ts` builds a **real** client over a fake `fetch` rather than
+mocking the client itself — so the HTTPS check, the timeout, the byte ceiling, the
+content-type check and the `Authorization` header are all exercised rather than stubbed
+away.
+
+Every state transition — enable, disable, conflict, idempotence, preflight refusal,
+dry run, post-write verification — is covered there, in `tests/unit/hook-command.test.ts`
+and `tests/unit/hook-plan.test.ts`.
+
+`tests/integration/management-api.test.ts` is the only test that can reach Supabase. It
+is **read-only**, skips itself unless both `SADA_TEST_SUPABASE_PROJECT_REF` and
+`SADA_TEST_SUPABASE_ACCESS_TOKEN` are set, and deliberately does not read the CLI's own
+`SUPABASE_*` variables — the same rule that keeps `SADA_TEST_DB_URL` separate from
+`SUPABASE_DB_URL`. It exists to notice if Supabase renames or removes the two hook fields.
+
+**There is no live mutation test, and adding one needs more than a flag.**
+`SADA_ALLOW_REMOTE_MUTATION_TESTS` is reserved for that decision. Credentials being
+present is never permission to change somebody's Auth configuration, and a suite whose
+failure mode is leaving a real project mid-change is not worth the confidence it buys.
+
+#### Testing that secrets do not leak
+
+`tests/unit/secrets.test.ts` drives every plausible output path with a sentinel token and
+asserts it never appears: request URLs, PATCH bodies, normal logs, dry-run output, thrown
+`AppError` messages and hints, and the full `--debug` rendering including attached causes.
+
+Two real leaks were found by these tests rather than by reading the code — a server that
+echoes the token back into its own error message, and a transport error whose `cause`
+carried it into `--debug` output. **Add a case here whenever you add a path that prints
+anything**, and treat a failure as a security bug rather than a test to adjust.
+
+The same file asserts the Auth configuration document is never dumped, using a fixture
+padded with fake SMTP and OAuth secrets.
+
 #### Damaging the schema on purpose
 
 The fail-closed tests need a genuinely broken policy layer — a dropped lookup function,
@@ -205,6 +276,9 @@ npm run format:check
 npm test
 npm run build
 ```
+
+CI needs **no Supabase credentials of any kind** — no database URL and no Management API
+token. Every test that would need one skips itself.
 
 Formatting:
 
@@ -313,6 +387,40 @@ SUPABASE_DB_URL="postgresql://localhost:5432/scratch" npm run dev -- sync
 
 The dry run makes no database changes at all, so it is always safe to run first.
 
+## Working on hook activation
+
+The code lives in `src/supabase/` and `src/commands/hook.ts`, split so that the decision
+logic has no I/O in it:
+
+| Module                 | Knows about                                       | Does not know about |
+| ---------------------- | ------------------------------------------------- | ------------------- |
+| `constants.ts`         | the origin, the path, the hook URI, the ref shape | anything else       |
+| `management-client.ts` | HTTP, TLS, timeouts, statuses, schemas            | hooks               |
+| `auth-config.ts`       | hook state, what to write, what proves it         | the network         |
+| `commands/hook.ts`     | orchestration, preflight, output, exit codes      | HTTP details        |
+
+Keep `auth-config.ts` pure. It is the module that decides whether somebody's
+authentication configuration gets overwritten, and it is testable exhaustively — every
+combination of `enabled` and `uri`, for both intents — precisely because it touches
+nothing. If you find yourself wanting a network call or a clock in there, the logic
+belongs in `commands/hook.ts` instead.
+
+Three rules that are easy to break and expensive to get wrong:
+
+- **A URI that is not ours is never written over.** Enabled or disabled, `pg-functions:`
+  or HTTP, the answer is conflict. `tests/unit/hook-plan.test.ts` asserts this across the
+  whole state space; if you add a state, add it there first.
+- **The preflight runs before any network request.** Not before the PATCH — before the
+  GET. A refusal must not have sent a token anywhere, and the tests assert
+  `api.requests` is empty rather than merely that no PATCH was sent.
+- **`hook disable` must never require a database.** It is the command an operator reaches
+  for when the fail-closed hook is rejecting every signup, which is often exactly when
+  their database is the problem.
+
+Try the whole flow against a scratch database and a fake API without touching a real
+project: inject a `ManagementClient` built over your own `fetch` double, exactly as
+`tests/unit/hook-command.test.ts` does.
+
 ## Conventions
 
 - `process.env` is read **only** in `src/config/env.ts`. Everything else receives a
@@ -330,8 +438,23 @@ The dry run makes no database changes at all, so it is always safe to run first.
   one implementation of `begin`/`commit`/`rollback` on purpose: two would be two chances
   to drift, and a subtly different rollback path leaves a half-applied change nothing
   detects.
-- The network is reached only from `src/blocklist/fetch.ts`. Anything downloaded is
-  data: never executed, never evaluated, never written to disk, never passed to a shell.
+- The network is reached from exactly two places: `src/blocklist/fetch.ts` (public,
+  unauthenticated) and `src/supabase/management-client.ts` (authenticated). Anything
+  downloaded is data: never executed, never evaluated, never written to disk, never
+  passed to a shell.
+- **The Management API origin is a compiled-in constant.** Never add a flag, environment
+  variable or config file that sets it. A settable API origin turns a CLI holding a
+  Management API token into a credential-exfiltration primitive. `ManagementClientOptions.baseUrl`
+  exists for dependency injection in tests and must stay unreachable from user input.
+- **`SUPABASE_ACCESS_TOKEN` goes in an `Authorization` header and nowhere else.** Not a
+  URL, not a log, not an error message, not a file, not a process argument. Sanitise any
+  server-supplied text and any attached `cause` before it can reach a terminal, and add a
+  case to `tests/unit/secrets.test.ts` for every new output path.
+- **Never PATCH the whole Auth configuration.** Send only the fields this feature owns.
+  Round-tripping a GET response would rewrite unrelated settings — including other
+  people's secrets — with stale values.
+- **Never claim a remote change succeeded without reading it back.** HTTP 200 means
+  accepted, not applied.
 - No `axios` and no HTTP client dependency. Native `fetch` only.
 - Application objects live only in the `guard` schema. Never `public`, never `auth`, and
   `auth.users` is never modified.

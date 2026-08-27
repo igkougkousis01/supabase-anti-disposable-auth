@@ -1,48 +1,82 @@
 /**
- * `status` — reports what is actually installed in the target database.
+ * `status` — reports what is actually installed, and what is actually switched on.
  *
- * Read-only: it creates and modifies nothing, so it is safe against any database.
+ * Read-only: it creates and modifies nothing, so it is safe against any database and any
+ * project.
  *
- * The report covers the database layer only, because the database layer is all that
- * exists. Features that are not built yet are listed as "not configured" with a hollow
- * marker rather than omitted, so the output is an honest picture of the whole product
- * instead of an implied claim that signups are already protected.
+ * The report spans two systems that must never be conflated, because they fail
+ * independently and are owned by different things:
  *
- * The auth-hook section is where that rule earns its keep. `status` can see that the
- * hook FUNCTION exists and that `supabase_auth_admin` can execute it; it cannot see
- * whether Supabase Auth has been configured to call it, because that configuration
- * lives in the Auth service, not in PostgreSQL. Those two facts are printed as two
- * separate lines and the second is never inferred from the first.
+ * ```text
+ *   PostgreSQL             the function exists, and supabase_auth_admin can run it
+ *   Supabase Auth          the service is configured to call it
+ * ```
+ *
+ * A function that exists is not a filter that runs. Until this branch, the second line
+ * was always a hollow "not verified", because nothing in the database can observe the
+ * Auth service's configuration. It now can be verified — but only when Management API
+ * credentials are supplied, and only by asking the Management API. So the second line
+ * has three honest answers, not two: verified on, verified off, and **not checked**.
+ *
+ * The rule that governs the whole file: a missing optional credential must never turn a
+ * database-only status call into an error, and a supplied credential that fails must
+ * never be quietly downgraded into "not checked".
  */
 
 import type { Command } from 'commander';
 
-import { loadConfig } from '../config/env.js';
+import { loadConfig, requireDatabaseUrl } from '../config/env.js';
 import { createPostgresConnection } from '../database/client.js';
 import { AUTH_HOOK_ROLE, readGuardSchemaStatus } from '../database/schema-status.js';
 import type { GuardSchemaStatus } from '../database/schema-status.js';
 import type { MigrationFile } from '../database/migration-types.js';
 import type { DatabaseConnection, DatabaseConnectionConfig } from '../database/types.js';
-import { ConfigurationError, EXIT_CODES } from '../lib/errors.js';
-import type { ExitCode } from '../lib/errors.js';
+import { EXIT_CODES, toAppError } from '../lib/errors.js';
+import type { AppError, ExitCode } from '../lib/errors.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { Logger } from '../lib/logger.js';
 import { CLI_NAME, PRODUCT_NAME } from '../lib/package-info.js';
+import { describeHookUri } from '../lib/redact.js';
+import { getBeforeUserCreatedHookState } from '../supabase/auth-config.js';
+import { BEFORE_USER_CREATED_HOOK_URI } from '../supabase/constants.js';
+import { ManagementClient } from '../supabase/management-client.js';
+import type { BeforeUserCreatedHookState } from '../supabase/types.js';
 
 export interface StatusDependencies {
   readonly env: NodeJS.ProcessEnv;
   readonly connect: (config: DatabaseConnectionConfig) => Promise<DatabaseConnection>;
   /** Migrations to compare against. Defaults to the bundled `migrations/` directory. */
   readonly files?: MigrationFile[];
+  /** Management API client. Injected by tests over a fake `fetch`. */
+  readonly client?: ManagementClient;
 }
+
+/**
+ * What `status` was able to establish about the Auth service.
+ *
+ * `not-checked` and `failed` are separate on purpose. Both mean "we do not know", but
+ * one is a choice the operator made by not supplying credentials and the other is a
+ * problem they need to hear about. Collapsing them would let a revoked token look
+ * exactly like an ordinary database-only run.
+ */
+export type RemoteActivation =
+  /** No Management API credentials were supplied. Not an error. */
+  | { readonly kind: 'not-checked' }
+  /** Verified: Supabase Auth calls our hook. */
+  | { readonly kind: 'active'; readonly state: BeforeUserCreatedHookState }
+  /** Verified: it does not. The slot is ours-but-off, or empty. */
+  | { readonly kind: 'inactive'; readonly state: BeforeUserCreatedHookState }
+  /** Verified: the slot belongs to another hook. */
+  | { readonly kind: 'conflict'; readonly state: BeforeUserCreatedHookState }
+  /** Credentials were supplied and the check could not be completed. */
+  | { readonly kind: 'failed'; readonly error: AppError };
 
 export interface StatusReport {
   /** Redacted `host:port/database`, safe to print. */
   readonly target: string;
   readonly schema: GuardSchemaStatus;
+  readonly remote: RemoteActivation;
 }
-
-const MISSING_URL_HINT = `Set SUPABASE_DB_URL (see .env.example) and run \`${CLI_NAME} status\` again.`;
 
 export async function runStatus(
   dependencies: Partial<StatusDependencies> = {},
@@ -50,22 +84,64 @@ export async function runStatus(
   const env = dependencies.env ?? process.env;
   const connect = dependencies.connect ?? createPostgresConnection;
 
-  const databaseUrl = loadConfig(env).databaseUrl;
-  if (databaseUrl === undefined) {
-    throw new ConfigurationError('SUPABASE_DB_URL is missing', { hint: MISSING_URL_HINT });
-  }
+  const config = loadConfig(env);
+  const databaseUrl = requireDatabaseUrl(config, 'status');
 
   const connection = await connect({ connectionString: databaseUrl });
 
+  let schema: GuardSchemaStatus;
   try {
-    return {
-      target: connection.target,
-      schema: await readGuardSchemaStatus(connection, {
-        ...(dependencies.files === undefined ? {} : { files: dependencies.files }),
-      }),
-    };
+    schema = await readGuardSchemaStatus(connection, {
+      ...(dependencies.files === undefined ? {} : { files: dependencies.files }),
+    });
   } finally {
     await connection.close().catch(() => undefined);
+  }
+
+  return {
+    target: connection.target,
+    schema,
+    remote: await readRemoteActivation(dependencies, config.projectRef, config.accessToken),
+  };
+}
+
+/**
+ * Checks the Auth service, but only when asked to, and never fatally.
+ *
+ * Failures are captured into the report rather than thrown, so a database report an
+ * operator asked for still gets printed when the Management API is down. They are
+ * captured, not swallowed: `failed` prints as an error line and changes the exit code.
+ */
+async function readRemoteActivation(
+  dependencies: Partial<StatusDependencies>,
+  projectRef: string | undefined,
+  accessToken: string | undefined,
+): Promise<RemoteActivation> {
+  // A project ref is needed to name the project, and a token to be allowed to ask about
+  // it. Absence of either is the documented, ordinary case -- `status` has always worked
+  // with a database alone and must keep doing so.
+  if (projectRef === undefined) {
+    return { kind: 'not-checked' };
+  }
+
+  let client: ManagementClient;
+  if (dependencies.client !== undefined) {
+    client = dependencies.client;
+  } else if (accessToken === undefined) {
+    return { kind: 'not-checked' };
+  } else {
+    client = new ManagementClient({ accessToken });
+  }
+
+  try {
+    const state = await getBeforeUserCreatedHookState(client, projectRef);
+
+    if (state.configured && !state.isOurs) {
+      return { kind: 'conflict', state };
+    }
+    return state.enabled && state.isOurs ? { kind: 'active', state } : { kind: 'inactive', state };
+  } catch (error) {
+    return { kind: 'failed', error: toAppError(error) };
   }
 }
 
@@ -83,7 +159,7 @@ export function printStatusReport(report: StatusReport, logger: Logger = default
   if (schema.health === 'not-installed') {
     logger.pending('Not installed');
     logger.blank();
-    printPlannedSections(logger);
+    printHookAndSyncSections(logger, report);
     logger.blank();
     logger.plain(`Run \`${CLI_NAME} install\` to create the guard schema.`);
     return;
@@ -122,11 +198,18 @@ export function printStatusReport(report: StatusReport, logger: Logger = default
   }
 
   logger.blank();
-  printPlannedSections(logger, schema);
+  printHookAndSyncSections(logger, report);
   logger.blank();
 
+  // The dangerous combination gets the last word, because it is the only state in which
+  // an operator's project is actively broken right now rather than merely unprotected.
+  if (isDangerouslyActive(report)) {
+    printDangerNotice(logger);
+    return;
+  }
+
   if (!incomplete) {
-    logger.plain('Database guard layer is up to date.');
+    printHealthySummary(logger, report);
     return;
   }
 
@@ -145,12 +228,6 @@ export function printStatusReport(report: StatusReport, logger: Logger = default
   // applied, and applied migrations are never replayed, so `install` will not
   // re-issue the grants it contains. Pointing at `install` here would send the
   // operator down a path that cannot work.
-  //
-  // The most likely way to arrive here is the one case the conditional migration
-  // cannot cover: 007 ran on a database where `supabase_auth_admin` did not exist
-  // yet, took its no-op branch, and was recorded as applied. Creating the role
-  // afterwards does not retroactively produce the grants. See the README section
-  // this points at.
   if (schema.authHookGrants === 'incomplete') {
     logger.plain(
       `Guard layer requires repair. ${AUTH_HOOK_ROLE} cannot execute the hook, so every signup would be rejected once the hook is activated in Supabase.`,
@@ -167,6 +244,61 @@ export function printStatusReport(report: StatusReport, logger: Logger = default
   logger.plain(
     `Incomplete installation. Run \`${CLI_NAME} install\` to apply the pending migrations.`,
   );
+}
+
+/**
+ * The state that must never be printed calmly.
+ *
+ * Supabase Auth is calling a hook whose database layer is damaged. Because the hook
+ * fails closed, this is not "protection is degraded" — it is "every signup on this
+ * project is being rejected right now", and it is the only status combination where the
+ * fix is measured in minutes.
+ */
+function isDangerouslyActive(report: StatusReport): boolean {
+  return report.remote.kind === 'active' && report.schema.health !== 'complete';
+}
+
+function printDangerNotice(logger: Logger): void {
+  logger.error('DANGER: the hook is ACTIVE in Supabase Auth and the database layer is broken.');
+  logger.plain('The hook fails closed, so signups on this project are being rejected now.');
+  logger.plain(`Either repair the guard layer, or run \`${CLI_NAME} hook disable\` to stop the`);
+  logger.plain('rejections while you do — disabling first is the safe order.');
+}
+
+/**
+ * The closing verdict, which is the line an operator actually reads.
+ *
+ * Only the `active` branch is allowed to describe the project as protected, and only
+ * because that branch was proven by a live read of the Auth configuration. Every other
+ * branch says, in one form or another, that signups are not being filtered — the phrasing
+ * is deliberately chosen so that no line short of `active` can be misread as an
+ * activation claim, even out of context in a scrollback or a screenshot.
+ */
+function printHealthySummary(logger: Logger, report: StatusReport): void {
+  switch (report.remote.kind) {
+    case 'active':
+      logger.plain('Active protection: the guard layer is healthy and Supabase Auth calls it.');
+      logger.plain('Signups are filtered.');
+      return;
+    case 'conflict':
+      logger.plain('Database guard layer is up to date, but Supabase Auth points its Before User');
+      logger.plain('Created slot at a different hook. Signups are NOT filtered by this tool.');
+      return;
+    case 'inactive':
+      logger.plain('Database guard layer is up to date. Supabase Auth is NOT calling the guard');
+      logger.plain(
+        `hook, so nothing checks a signup. Run \`${CLI_NAME} hook enable\` to switch it on.`,
+      );
+      return;
+    case 'failed':
+      logger.plain('Database guard layer is up to date. Whether Supabase Auth calls the guard');
+      logger.plain('hook could not be determined — see the error above. Assume it does not.');
+      return;
+    case 'not-checked':
+      logger.plain('Database guard layer is up to date. Whether Supabase Auth calls the guard');
+      logger.plain('hook was not checked, so nothing here confirms any signup reaches it.');
+      return;
+  }
 }
 
 /** Success marker only when the installation is whole; neutral otherwise. */
@@ -191,26 +323,29 @@ function reportCount(logger: Logger, label: string, count: number | undefined): 
 /**
  * The Before User Created hook section, plus what is still unbuilt.
  *
- * `schema` is `undefined` when nothing is installed at all, in which case there is no
- * database state to describe and the whole section is reported as absent.
+ * The schema is `undefined` when nothing is installed at all, in which case there is no
+ * database state to describe and the database half is reported as absent. The remote
+ * half is still reported, because "nothing installed, hook enabled" is a real and
+ * alarming state that must not be hidden behind a missing schema.
  */
-function printPlannedSections(logger: Logger, schema?: GuardSchemaStatus): void {
+function printHookAndSyncSections(logger: Logger, report: StatusReport): void {
   logger.plain('Before User Created Hook');
-  printHookSection(logger, schema);
+  printHookSection(logger, report);
   logger.blank();
   logger.plain('Automatic sync');
   logger.pending('Not configured (not implemented yet)');
 }
 
 /**
- * Reports the two independent facts about the hook, and refuses to conflate them.
+ * Reports the three independent facts about the hook, and refuses to conflate them.
  *
- * Installing the function and activating the hook are different events with different
- * owners: `install` does the first, a human (or a later branch) does the second in
- * Supabase. Until activation is verifiable, the second line is always a hollow
- * "not verified" -- never a tick, and never omitted.
+ * The function existing, the grants being held, and Supabase Auth being configured to
+ * call it are separate conditions with separate owners and separate failure modes. Each
+ * gets its own line, and no line is ever inferred from another.
  */
-function printHookSection(logger: Logger, schema?: GuardSchemaStatus): void {
+function printHookSection(logger: Logger, report: StatusReport): void {
+  const schema = report.schema.schemaInstalled ? report.schema : undefined;
+
   if (schema === undefined || !schema.hookFunctionInstalled) {
     logger.pending('Function not installed (guard.before_user_created(jsonb))');
   } else {
@@ -221,9 +356,42 @@ function printHookSection(logger: Logger, schema?: GuardSchemaStatus): void {
     printHookGrants(logger, schema);
   }
 
-  // Deliberately unconditional and deliberately hollow. Nothing in this branch can
-  // observe the Supabase Auth configuration, so nothing here may imply it is on.
-  logger.pending('Supabase activation not verified (configure the hook in Supabase)');
+  printRemoteActivation(logger, report.remote);
+}
+
+function printRemoteActivation(logger: Logger, remote: RemoteActivation): void {
+  switch (remote.kind) {
+    case 'not-checked':
+      // Hollow, never a tick. Nothing was observed, so nothing may be claimed.
+      logger.pending(
+        'Remote activation not checked (set SUPABASE_PROJECT_REF and SUPABASE_ACCESS_TOKEN)',
+      );
+      return;
+    case 'active':
+      logger.success('Activated in Supabase Auth');
+      logger.success(`Auth hook URI: ${BEFORE_USER_CREATED_HOOK_URI}`);
+      return;
+    case 'inactive':
+      logger.pending(
+        remote.state.configured
+          ? 'Not activated in Supabase Auth (URI configured, hook disabled)'
+          : 'Not activated in Supabase Auth (no hook configured)',
+      );
+      return;
+    case 'conflict':
+      logger.error(
+        `Conflict: another Before User Created hook is configured (${describeHookUri(remote.state.uri)})`,
+      );
+      return;
+    case 'failed':
+      // Honest failure, never downgraded to "not checked". Credentials were supplied,
+      // so the operator asked the question and deserves the real answer.
+      logger.error(`Remote activation check failed: ${remote.error.message}`);
+      if (remote.error.hint !== undefined) {
+        logger.plain(`  ${remote.error.hint}`);
+      }
+      return;
+  }
 }
 
 function printHookGrants(logger: Logger, schema: GuardSchemaStatus): void {
@@ -250,13 +418,32 @@ function printHookGrants(logger: Logger, schema: GuardSchemaStatus): void {
 /**
  * Process exit code for a status report, so `status` doubles as a health check.
  *
- * Only the guard layer's own health is expressed here. Configuration and database
- * failures never reach this function: they are thrown as {@link AppError} subclasses and
- * keep their own exit codes via the CLI's top-level handler, which is what lets a CI job
- * distinguish "cannot reach the database" from "reached it, guard layer is broken".
+ * Precedence, most-certain verdict first:
+ *
+ *  1. **`5` guard health** — the database is definitely damaged. A definite failure
+ *     outranks everything else, and it is what the remote states are dangerous
+ *     *because* of.
+ *  2. **`8` hook conflict** — a definite remote finding that needs a human decision.
+ *  3. **`7` remote failure** — we were asked to check and could not. Least certain, so
+ *     last.
+ *  4. **`0`** — including a healthy database whose hook is simply not activated. That is
+ *     a documented, deliberate state, not a failure, and making it non-zero would break
+ *     every existing database-only health check.
+ *
+ * Configuration and database-connection failures never reach this function: they are
+ * thrown and keep their own codes via the CLI's top-level handler.
  */
 export function statusExitCode(report: StatusReport): ExitCode {
-  return report.schema.health === 'complete' ? EXIT_CODES.success : EXIT_CODES.guardHealth;
+  if (report.schema.health !== 'complete') {
+    return EXIT_CODES.guardHealth;
+  }
+  if (report.remote.kind === 'conflict') {
+    return EXIT_CODES.hookConflict;
+  }
+  if (report.remote.kind === 'failed') {
+    return EXIT_CODES.remote;
+  }
+  return EXIT_CODES.success;
 }
 
 export function registerStatusCommand(
@@ -267,7 +454,7 @@ export function registerStatusCommand(
 ): Command {
   return program
     .command('status')
-    .description('Report the state of the guard schema in the target database.')
+    .description('Report the guard schema, and whether the hook is active in Supabase Auth.')
     .action(async () => {
       const report = await runStatus(dependencies);
       printStatusReport(report, logger);

@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  AuthHookConflictError,
+  AuthHookVerificationError,
   ConfigurationError,
   DatabaseConnectionError,
   EXIT_CODES,
   formatErrorForUser,
+  GuardHealthError,
   isAppError,
+  SupabaseApiError,
   toAppError,
   UnexpectedError,
 } from '../../src/lib/errors.js';
@@ -20,6 +24,38 @@ describe('error kinds', () => {
 
   it('keeps the class name for readable stack traces', () => {
     expect(new ConfigurationError('bad config').name).toBe('ConfigurationError');
+  });
+
+  it('maps each remote error to its own stable exit code', () => {
+    expect(new SupabaseApiError('api down').exitCode).toBe(EXIT_CODES.remote);
+    expect(new AuthHookConflictError('someone else').exitCode).toBe(EXIT_CODES.hookConflict);
+    expect(new AuthHookVerificationError('not applied').exitCode).toBe(EXIT_CODES.hookVerification);
+  });
+
+  it('reuses the guard-health code for a failed preflight', () => {
+    // The same verdict `status` reaches, acted on instead of merely reported -- so it
+    // gets the same code rather than a fourth one.
+    expect(new GuardHealthError('layer broken').exitCode).toBe(EXIT_CODES.guardHealth);
+  });
+
+  it('keeps every exit code distinct', () => {
+    // The point of the hierarchy: a CI job must be able to route "wrong token" and
+    // "somebody else's hook" and "we wrote it and it did not stick" to different places.
+    const codes = Object.values(EXIT_CODES);
+    expect(new Set(codes).size).toBe(codes.length);
+  });
+
+  it('does not conflate a remote failure with a configuration or database failure', () => {
+    for (const remote of [
+      new SupabaseApiError('x'),
+      new AuthHookConflictError('x'),
+      new AuthHookVerificationError('x'),
+    ]) {
+      expect(remote.exitCode).not.toBe(EXIT_CODES.configuration);
+      expect(remote.exitCode).not.toBe(EXIT_CODES.database);
+      expect(remote.exitCode).not.toBe(EXIT_CODES.guardHealth);
+      expect(remote.kind).toBe('remote');
+    }
   });
 });
 
