@@ -92,17 +92,15 @@ The concrete consequence, which is documented rather than engineered around:
 - `status` catches it: it probes each required privilege with `has_*_privilege()`
   against the live catalog instead of trusting the history, names what is missing, and
   exits non-zero.
-- The remediation is an idempotent, role-guarded grant snippet documented in
-  [Repairing the auth hook grants](../README.md#repairing-the-auth-hook-grants). It
-  grants only the privileges 007 grants and touches no history.
+- The remediation is `supabase-anti-disposable-auth repair`, previewed with
+  `repair --dry-run`. It grants only the privileges 007 grants and touches no history.
 
 This is rare in practice — hosted Supabase and `supabase start` both provide
 `supabase_auth_admin` long before this tool is installed.
 
 **Rule 1 applies here with no exception:** do not edit an applied migration, and do not
-delete its history row to force a replay. Both defeat the checksum audit. Repair the
-database state directly with a documented, idempotent snippet, or drop the `guard`
-schema and reinstall.
+delete its history row to force a replay. Both defeat the checksum audit. Use the
+current-state `repair` command, which never writes migration history.
 
 ## Bootstrap infrastructure: `guard` and `guard.schema_migrations`
 

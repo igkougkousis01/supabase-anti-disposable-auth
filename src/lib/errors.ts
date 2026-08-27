@@ -87,6 +87,12 @@ export const EXIT_CODES = {
    * is the default state and exits `0`.
    */
   strictConflict: 10,
+  /** Repair found altered ownership evidence or an owned-name conflict. */
+  repairConflict: 11,
+  /** Uninstall cannot prove that every destructive target belongs to this tool. */
+  uninstallConflict: 12,
+  /** A destructive uninstall was assessed but not explicitly confirmed. */
+  confirmationRequired: 13,
 } as const;
 
 export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES];
@@ -250,6 +256,24 @@ export class AuthHookVerificationError extends AppError {
 export class StrictTriggerConflictError extends AppError {
   readonly kind = 'database' as const;
   readonly exitCode = EXIT_CODES.strictConflict;
+}
+
+/** Repair found a state that must be resolved by an operator, not overwritten. */
+export class RepairConflictError extends AppError {
+  readonly kind = 'database' as const;
+  readonly exitCode = EXIT_CODES.repairConflict;
+}
+
+/** Uninstall could not prove that its fixed targets were safe to remove. */
+export class UninstallConflictError extends AppError {
+  readonly kind = 'database' as const;
+  readonly exitCode = EXIT_CODES.uninstallConflict;
+}
+
+/** The uninstall plan is safe, but the operator has not supplied destructive intent. */
+export class ConfirmationRequiredError extends AppError {
+  readonly kind = 'configuration' as const;
+  readonly exitCode = EXIT_CODES.confirmationRequired;
 }
 
 /** A bug, or an error we did not anticipate. Diagnostics are allowed here. */

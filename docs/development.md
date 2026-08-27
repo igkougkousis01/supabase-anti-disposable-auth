@@ -107,18 +107,19 @@ live upstream dataset.
 unless the relevant variable is set, which keeps `npm test` and CI offline by default.
 CI never requires Supabase credentials.
 
-There are six, and the distinction between the variables matters:
+There are seven, and the distinction between the variables matters:
 
-| Variable                                                             | Used by                  | Effect                                                                                     |
-| -------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------ |
-| `SUPABASE_DB_URL`                                                    | `database.test.ts`       | Read-only: connects and reads `server_version`.                                            |
-| `SADA_TEST_DB_URL`                                                   | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                              |
-| `SADA_TEST_DB_URL`                                                   | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly.          |
-| `SADA_TEST_DB_URL`                                                   | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.            |
-| `SADA_TEST_DB_URL`                                                   | `strict-trigger.test.ts` | **Destructive**: drops and recreates `guard` **and a synthetic `auth` schema it creates**. |
-| `SADA_TEST_SUPABASE_PROJECT_REF` + `SADA_TEST_SUPABASE_ACCESS_TOKEN` | `management-api.test.ts` | **Read-only**: one `GET` of a hosted project's Auth configuration. Changes nothing.        |
+| Variable                                                             | Used by                  | Effect                                                                                      |
+| -------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------- |
+| `SUPABASE_DB_URL`                                                    | `database.test.ts`       | Read-only: connects and reads `server_version`.                                             |
+| `SADA_TEST_DB_URL`                                                   | `guard-schema.test.ts`   | **Destructive**: drops and recreates `guard`.                                               |
+| `SADA_TEST_DB_URL`                                                   | `blocklist-sync.test.ts` | **Destructive**: drops `guard`, then replaces `guard.blocked_domains` repeatedly.           |
+| `SADA_TEST_DB_URL`                                                   | `auth-hook.test.ts`      | **Destructive**: drops and recreates `guard`; damages and rolls back inside it.             |
+| `SADA_TEST_DB_URL`                                                   | `strict-trigger.test.ts` | **Destructive**: drops and recreates `guard` **and a synthetic `auth` schema it creates**.  |
+| `SADA_TEST_DB_URL`                                                   | `lifecycle.test.ts`      | **Destructive**: repair/uninstall fixtures drop and recreate `guard`; hosted API is mocked. |
+| `SADA_TEST_SUPABASE_PROJECT_REF` + `SADA_TEST_SUPABASE_ACCESS_TOKEN` | `management-api.test.ts` | **Read-only**: one `GET` of a hosted project's Auth configuration. Changes nothing.         |
 
-> **⚠️ These four run `drop schema if exists guard cascade`.**
+> **⚠️ These five run `drop schema if exists guard cascade` in test setup/teardown.**
 > They create the schema from scratch, exercise it, and drop it again. Any data you had in
 > `guard` is destroyed.
 >
@@ -230,6 +231,12 @@ away.
 Every state transition — enable, disable, conflict, idempotence, preflight refusal,
 dry run, post-write verification — is covered there, in `tests/unit/hook-command.test.ts`
 and `tests/unit/hook-plan.test.ts`.
+
+Uninstall adds 401/403/404/429/5xx refusal, foreign state, post-PATCH mismatch, token
+redaction, zero-write dry-run, strict-then-remote failure, remote-then-database failure,
+and retry/resume coverage in `uninstall-command.test.ts`. The real PostgreSQL half runs
+in `lifecycle.test.ts` against `SADA_TEST_DB_URL`; its Management client still uses fake
+`fetch`, so no hosted configuration is mutated.
 
 `tests/integration/management-api.test.ts` is the only test that can reach Supabase. It
 is **read-only**, skips itself unless both `SADA_TEST_SUPABASE_PROJECT_REF` and
@@ -503,6 +510,50 @@ Identifiers in the DDL are compiled-in constants and a unit test asserts the exa
 `--dry-run`, and `--dry-run` must execute zero DDL — asserted in both the unit and the
 integration suites.
 
+## Working on repair and uninstall
+
+The lifecycle boundary is split deliberately:
+
+| Module                  | Responsibility                                                            |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `database/lifecycle.ts` | read-only migration, catalog, owner, object and dependency evidence       |
+| `database/repair.ts`    | the two leaf-function repairs and fixed least-privilege grant SQL         |
+| `database/uninstall.ts` | explicit dependency-safe drop batch; no decisions and no `CASCADE`        |
+| `commands/repair.ts`    | five-state planner, optional remote read, output and verification         |
+| `commands/uninstall.ts` | cross-system ordering, confirmation, remote verification and resumability |
+
+Rules for changes here:
+
+- Migration history is evidence. Repair must never update/delete rows, mark a migration
+  applied, or rerun a historical batch. A new repair target needs a deliberate current-
+  state routine and tests proving its boundary.
+- `repair` never enables remote or strict enforcement. A new repair that changes intent
+  is a feature and does not belong in this command.
+- A same-name database object is not automatically ours. Keep migration checksums,
+  owner, catalog shape, function body, unexpected-object and dependency checks aligned
+  whenever an owned object is added.
+- `--yes` confirms a plan; it is not a force flag. Conflict checks run before it and
+  cannot be bypassed.
+- Full uninstall must freshly disable and verify the hosted hook before database cleanup.
+  No refactor may move guard deletion above that point.
+- Never introduce `DROP SCHEMA guard CASCADE` into production code. Setup/teardown in a
+  dedicated scratch test database is the only allowed use. Production cleanup names
+  fixed objects explicitly and finishes with plain `DROP SCHEMA guard`.
+- Cross-system partial failure is expected. Keep steps idempotent and preserve the safe
+  intermediate states exercised by failure-injection tests.
+
+To run the destructive lifecycle fixtures, use only a dedicated database:
+
+```bash
+createdb supabase_anti_disposable_auth_test
+SADA_TEST_DB_URL=postgresql://localhost:5432/supabase_anti_disposable_auth_test \
+  npm run test:integration
+```
+
+The missing-grant and missing-hook repair cases require `supabase_auth_admin`. On a plain
+scratch cluster those cases skip explicitly unless you created that synthetic role. Do
+not create cluster-wide roles automatically from the test suite.
+
 ## Conventions
 
 - `process.env` is read **only** in `src/config/env.ts`. Everything else receives a
@@ -514,7 +565,8 @@ integration suites.
   `describeConnectionTarget()` when you need to name a database in output.
 - All values sent to PostgreSQL are bound query parameters. The one exception is
   `DatabaseConnection.execute()`, which sends a multi-statement script verbatim and is
-  reserved for migration files that ship with this package — never for user input.
+  reserved for fixed migration, repair, strict-trigger, and uninstall SQL that ships
+  with this package — never for user input or a runtime-derived identifier.
 - No ORM and no migration framework. Plain SQL through `pg`.
 - Transactions go through `inTransaction()` in `src/database/transaction.ts`. There is
   one implementation of `begin`/`commit`/`rollback` on purpose: two would be two chances

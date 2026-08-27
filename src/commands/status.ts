@@ -240,7 +240,9 @@ export function printStatusReport(report: StatusReport, logger: Logger = default
     logger.plain(
       `Guard layer requires repair. Objects recorded as applied are missing, so \`${CLI_NAME} install\` will not recreate them.`,
     );
-    logger.plain('Drop the guard schema and reinstall, or restore the missing objects by hand.');
+    logger.plain(
+      `Run \`${CLI_NAME} repair --dry-run\` for a safe assessment. Leaf functions can be restored; missing data tables require manual recovery.`,
+    );
     return;
   }
 
@@ -256,7 +258,7 @@ export function printStatusReport(report: StatusReport, logger: Logger = default
       `\`${CLI_NAME} install\` will not fix this: migrations/007_auth_hook_permissions.sql is already recorded as applied, and applied migrations are never replayed.`,
     );
     logger.plain(
-      'Apply the idempotent grant snippet from "Repairing the auth hook grants" in the README, or drop the guard schema and install again.',
+      `Run \`${CLI_NAME} repair --dry-run\` to preview the exact least-privilege grants, then \`${CLI_NAME} repair\` to restore them.`,
     );
     return;
   }

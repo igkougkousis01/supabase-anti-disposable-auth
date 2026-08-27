@@ -85,6 +85,20 @@ export {
   type InstallReport,
 } from './commands/install.js';
 export {
+  planRepair,
+  printRepairReport,
+  registerRepairCommand,
+  repairExitCode,
+  runRepair,
+  type RepairAssessment,
+  type RepairAssessmentInput,
+  type RepairDependencies,
+  type RepairOptions,
+  type RepairRemoteState,
+  type RepairReport,
+  type RepairState,
+} from './commands/repair.js';
+export {
   hookStatusExitCode,
   printHookMutationReport,
   printHookStatusReport,
@@ -125,6 +139,23 @@ export {
   type StrictStatusReport,
 } from './commands/strict.js';
 export {
+  planUninstall,
+  printUninstallPlan,
+  printUninstallResult,
+  registerUninstallCommand,
+  runUninstall,
+  uninstallExitCode,
+  type UninstallAssessment,
+  type UninstallAssessmentInput,
+  type UninstallAssessmentState,
+  type UninstallDependencies,
+  type UninstallEvents,
+  type UninstallOptions,
+  type UninstallRemoteState,
+  type UninstallReport,
+  type UninstallResultState,
+} from './commands/uninstall.js';
+export {
   isSupportedNodeVersion,
   loadConfig,
   loadEnvFileIfPresent,
@@ -158,7 +189,29 @@ export type {
   MigrationRunResult,
   MigrationState,
 } from './database/migration-types.js';
-export { readGuardSchemaStatus, type GuardSchemaStatus } from './database/schema-status.js';
+export {
+  inspectAuthHookGrants,
+  readGuardSchemaStatus,
+  REQUIRED_AUTH_HOOK_GRANTS,
+  type AuthHookGrantInspection,
+  type GuardSchemaStatus,
+  type PrivilegeProbe,
+} from './database/schema-status.js';
+export {
+  CORE_DATA_TABLES,
+  extractCreateFunctionSql,
+  extractFunctionSource,
+  inspectGuardLifecycle,
+  REPAIRABLE_LEAF_FUNCTIONS,
+  type GuardLifecycleInspection,
+  type InspectGuardLifecycleOptions,
+} from './database/lifecycle.js';
+export {
+  applyDatabaseRepair,
+  RESTORE_AUTH_HOOK_GRANTS_SQL,
+  type DatabaseRepairChange,
+  type DatabaseRepairKind,
+} from './database/repair.js';
 export {
   createStrictTrigger,
   dropStrictTrigger,
@@ -182,6 +235,7 @@ export {
   type StrictTriggerState,
 } from './database/strict-trigger.js';
 export { inTransaction } from './database/transaction.js';
+export { dropGuardObjects, DROP_GUARD_OBJECTS_SQL } from './database/uninstall.js';
 export type {
   DatabaseConnection,
   DatabaseConnectionConfig,
@@ -196,6 +250,7 @@ export {
   BlocklistFetchError,
   BlocklistValidationError,
   ConfigurationError,
+  ConfirmationRequiredError,
   DatabaseConnectionError,
   DatabaseQueryError,
   EXIT_CODES,
@@ -203,10 +258,12 @@ export {
   GuardHealthError,
   isAppError,
   MigrationError,
+  RepairConflictError,
   StrictTriggerConflictError,
   SupabaseApiError,
   SuspiciousUpdateError,
   SyncError,
+  UninstallConflictError,
   toAppError,
   UnexpectedError,
   type ErrorKind,

@@ -5,7 +5,8 @@
 This project is in early development. The CLI, the `guard` database schema, manual
 blocklist synchronisation, the **Before User Created hook function**, **hosted hook
 activation through the Supabase Management API** and an **optional strict trigger mode**
-exist. Strict mode is off by default and is not a substitute for the hook.
+exist. Conservative repair and ownership-verified uninstall are implemented. Strict mode
+is off by default and is not a substitute for the hook.
 
 **Installing the hook function still does not switch protection on.** Supabase Auth must
 be configured to call it — by `hook enable`, the dashboard, or `config.toml`. Until that
@@ -149,6 +150,48 @@ state loudly, and `strict disable` needs no guard-schema access to reverse it. T
 hook, that a **phone-only or anonymous account with no email is not blocked** is intended:
 `auth.users.email` is nullable and this tool enforces disposable-_email_ policy only where
 an email exists.
+
+Security properties of **repair and uninstall** that are in scope:
+
+- **Remote Auth is never left calling a deleted function.** Full uninstall must read
+  current hosted state, disable only this tool's URI, verify it off with a fresh read,
+  and only then permit guard cleanup. Any path that removes the function first is a
+  vulnerability.
+- **A foreign `guard` schema or object is never deleted on name alone.** Migration
+  checksums, catalog identity, definitions, owners, unexpected objects, and dependencies
+  are verified. Any path that deletes an ambiguous object, a user-added object, or an
+  external dependent is a vulnerability.
+- **Production cleanup never broadly cascades.** `DROP SCHEMA guard CASCADE`,
+  `DROP OWNED`, arbitrary identifiers, and a force flag are forbidden. A missed
+  dependency must make PostgreSQL reject and roll back cleanup.
+- **A foreign hosted hook or strict trigger is never modified.** This applies whether it
+  is enabled or disabled, and confirmation does not override it.
+- **Partial uninstall remains safe and resumable.** A remote failure after strict
+  removal leaves guard intact. A database failure after remote disable leaves Auth off
+  and guard intact. Rerunning must continue from observed current state without
+  resurrecting enforcement or failing merely because an earlier step is absent.
+- **Repair cannot escalate privileges.** It may add only schema `USAGE`, three fixed
+  function `EXECUTE` grants, and two fixed table `SELECT` grants to
+  `supabase_auth_admin`. Any write, `CREATE`, metadata access, arbitrary grantee, or
+  broader object grant is a vulnerability.
+- **Repair cannot change operator intent.** It never enables the hosted hook and never
+  creates the strict trigger. Disabled enforcement must remain disabled.
+- **Migration history remains append-only evidence.** Repair must not insert, update, or
+  delete `guard.schema_migrations`, mark missing migrations applied, or replay a
+  historical migration batch. Checksum disagreement is a refusal, never a repair.
+- **Data loss is not disguised as health.** Missing blocklist, allowlist, sync, or
+  migration-history tables must not be recreated automatically. The allowlist may hold
+  operator policy and its destruction must be explicit in the uninstall plan.
+- **`--yes` is confirmation, not force.** It must be evaluated only after every safety
+  check and cannot bypass ownership, dependency, trigger, or remote conflicts.
+- **Dry-run is real.** `repair --dry-run` and `uninstall --dry-run` run the same
+  assessment as execution but issue no remote PATCH and no database DDL.
+
+The unavoidable cross-system limitation is not a vulnerability: Supabase's Management
+API and PostgreSQL cannot participate in one transaction. The documented, verified safe
+intermediate states above are the mitigation. Likewise, `uninstall --database-only --yes`
+with unknown remote state is an explicit dangerous operator choice, accompanied by a
+warning; silently choosing it or omitting confirmation would be a vulnerability.
 
 Out of scope: vulnerabilities in Supabase, PostgreSQL, or third-party dependencies.
 Report those to their respective maintainers.

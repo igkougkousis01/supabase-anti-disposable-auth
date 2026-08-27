@@ -696,16 +696,18 @@ inferred from the presence of the function.
 
 #### Removal ordering
 
-Removing the hook has a required order:
+Full removal has a required order:
 
-1. **Disable the Auth Hook first** — `hook disable`, or the dashboard, or removing the
+1. **Remove our strict trigger first**, if it exists.
+2. **Disable and verify the Auth Hook** — `hook disable`, or the dashboard, or removing the
    `config.toml` block on a local stack.
-2. **Then** drop the function and revoke the grants.
+3. **Then** remove the verified database objects.
 
 Reversed, Supabase Auth keeps calling a function that no longer exists and **every
 signup fails** until the configuration catches up.
 
-This ordering is why `hook disable` performs no database preflight and requires no
+`uninstall` implements this ordering and repeats ownership/dependency checks before the
+last step. This ordering is also why `hook disable` performs no database preflight and requires no
 database credentials at all. The step that stops the bleeding must work when the database
 does not — an operator whose database is unreachable is in exactly the situation where
 the fail-closed hook is rejecting every signup, and needing a working database connection
@@ -1356,6 +1358,104 @@ an insert, with `EXPLAIN` confirming an Index Only Scan on `blocked_domains_pkey
 shared buffer hits per evaluation. No additional index is justified — every lookup is an
 exact equality match on the normalised primary key.
 
+### 9. Repair (implemented, conservative)
+
+Repair and install are intentionally different state machines. Install applies pending,
+append-only migrations. Repair acts on current catalog drift without changing what the
+migration record says happened.
+
+The repair assessment is one of `healthy`, `repairable`, `manual-action-required`,
+`conflict`, or `not-installed`. The only admitted writes are:
+
+1. the exact six-item `supabase_auth_admin` grant set already required by the
+   `SECURITY INVOKER` hook chain;
+2. a missing `guard.before_user_created(jsonb)` leaf function whose applied migration
+   checksum and surrounding ownership evidence are verified;
+3. a missing inert `guard.enforce_auth_user_email()` leaf function under the same
+   evidence rule.
+
+Leaf-function repair extracts one fixed `CREATE FUNCTION` statement from the bundled,
+checksummed definition, applies its revokes/comment, and restores the exact grants where
+needed. It never executes the historical migration batch and never inserts, updates,
+or deletes `guard.schema_migrations`.
+
+Core tables and core lookup functions are outside automatic scope. A missing blocklist,
+allowlist, sync table, or migration table may represent lost data or lost evidence;
+recreating an empty shell would conceal that fact. Altered same-name objects, foreign
+objects inside `guard`, owner mismatches, a foreign strict trigger, and a foreign remote
+hook are conflicts, so the command writes nothing.
+
+Remote and strict state preserve intent. Repair may read hosted state when credentials
+are present, but it sends no Management API PATCH. It never activates a disabled hook
+and never creates an absent strict trigger.
+
+### 10. Uninstall (implemented, cross-system and resumable)
+
+Uninstall first constructs a read-only safety plan across PostgreSQL and, for full mode,
+the Supabase Management API. `--dry-run` returns after that plan. Non-dry execution
+requires `--yes`; confirmation cannot override any safety verdict.
+
+The mutation order is:
+
+```text
+catalog/history/owner/dependency preflight
+        ↓
+drop our verified strict trigger (or no-op)
+        ↓
+fresh remote GET → disable our hook → fresh verification GET
+        ↓
+repeat guard ownership/dependency inspection
+        ↓
+explicit non-CASCADE guard cleanup in one PostgreSQL transaction
+```
+
+The hosted hook can therefore never remain enabled while its database function is
+deleted. A foreign hosted URI is a conflict even when disabled; it is never cleared or
+patched. Missing Management credentials block full uninstall. `--database-only` is an
+explicit escape for local or deliberately separate database teardown: it never mutates
+hosted configuration, refuses a hook proven active, warns when remote state is unknown,
+and still requires `--yes`.
+
+#### Ownership evidence
+
+The `guard` name alone proves nothing. The inspector combines:
+
+- the existence and checksums of append-only `guard.schema_migrations` rows;
+- the set of objects expected for the applied versions, including partial installs;
+- relation kinds, owners, exact column order/types/nullability/defaults, constraint
+  identity and shape;
+- function identity, result, language, volatility, strictness, parallel safety,
+  `SECURITY INVOKER`, pinned `search_path`, and exact body source;
+- unexpected relations, routines, constraints, triggers, policies, rules, standalone
+  types, operators, collations, and conversions inside `guard`;
+- dependencies recorded by PostgreSQL from objects outside `guard` to its relations,
+  functions, or types.
+
+Unexpected objects, modified definitions, owner divergence, or external dependencies
+stop the plan before any mutation. A partial install may have expected objects missing;
+that is resumable because deletion only targets verified objects still present.
+
+#### No broad cascade
+
+Cleanup names each owned function and table in dependency-safe order, drops
+`schema_migrations` last, then issues plain `DROP SCHEMA guard`. There is no
+`DROP SCHEMA ... CASCADE`, `DROP OWNED`, arbitrary identifier, or force flag. Table-owned
+constraints and indexes disappear as part of their table, but an external dependency
+makes PostgreSQL reject and roll back the transaction rather than deleting it.
+
+#### Cross-system failure model
+
+The Management API and PostgreSQL have no distributed transaction. The design chooses
+the safe intermediate state and makes it resumable:
+
+- strict removed, remote failure → guard remains intact;
+- remote disabled and verified, database failure → guard remains intact and Auth is
+  safely off;
+- rerun → absent strict and inactive remote are no-ops, then cleanup continues.
+
+Database cleanup itself is transactional. A failed explicit drop rolls the whole guard
+cleanup back. The command never claims cross-system atomicity.
+
 ## Planned optional features
 
 These are opt-in and explicitly **not** part of the default install:
@@ -1371,7 +1471,7 @@ These are opt-in and explicitly **not** part of the default install:
 
 1. **Reversible.** Everything the tool creates lives in one schema and is removable by
    `uninstall`.
-2. **Explicit.** Destructive or state-changing commands will support a dry run that
+2. **Explicit.** Destructive or state-changing commands support a dry run that
    prints the exact SQL first.
 3. **Non-invasive, with one opt-in exception.** Application schemas are never touched and
    nothing is ever created inside `auth` — no table, no function, no type. The single
@@ -1501,6 +1601,18 @@ facts drive the table below.
 | **Recursion or side effects in the write path**                                                                                                                                           | The function evaluates and returns `NEW`. It writes to nothing, makes no network call, touches no Management API, and cannot recurse. Asserted by test and by the absence of any statement against a table in its body.                                                                                                                                                                                                    |
 | **Breaking phone-only and anonymous auth**                                                                                                                                                | `NULL`, empty and whitespace emails all allow, matching Supabase's nullable `email` column and its `NULL`-for-absent storage. Covered by live-database tests.                                                                                                                                                                                                                                                              |
 | **An operator believing strict mode replaces the hook**                                                                                                                                   | Every surface says otherwise: `strict enable`'s success output, `strict status`'s closing note, the command description, the README and this document. `status` reports the two layers separately and never infers one from the other.                                                                                                                                                                                     |
+
+## Repair and uninstall threat model
+
+| Concern                                         | Mitigation                                                                                                                                                      |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Remote hook left pointing at a deleted function | Full uninstall performs a fresh remote read, disables only this tool's URI, verifies it off, and only then permits database cleanup.                            |
+| Foreign schema or object deletion               | Migration evidence, catalog identity, definition and owner checks; unexpected-object refusal; external-dependency refusal; fixed identifiers; no broad CASCADE. |
+| Partial uninstall                               | Idempotent strict/remote/database steps and a safe intermediate state; database cleanup is transactional; reruns resume from current observed state.            |
+| Repair escalates privileges                     | One compiled-in six-grant plan: schema `USAGE`, three `EXECUTE`, and two `SELECT`; no writes, `CREATE`, metadata access, or arbitrary grantee.                  |
+| Repair changes operator intent                  | No remote PATCH and no trigger creation. Disabled hosted and strict modes remain disabled.                                                                      |
+| Migration evidence falsified by repair          | Repair never writes `guard.schema_migrations`; checksum disagreement is a conflict.                                                                             |
+| Confirmation used as a force bypass             | `--yes` is checked only after every conflict and dependency verdict; it confirms destruction and changes no safety decision.                                    |
 
 ## Database threat model
 

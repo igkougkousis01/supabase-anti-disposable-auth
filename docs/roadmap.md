@@ -72,13 +72,12 @@ Deliberately deferred from this branch, and the reason:
   of a project's hosted Auth configuration.
 - Editing a user's `supabase/config.toml` automatically — documented instead.
 - `uninstall` support for the hook, beyond documenting the required removal order.
-- **A privilege-repair subsystem.** `007_auth_hook_permissions.sql` grants
+- **A privilege-repair subsystem (delivered in v0.8).** `007_auth_hook_permissions.sql` grants
   conditionally on `supabase_auth_admin` existing, and applied migrations are never
   replayed, so a database that gained the role after installation keeps missing grants.
   `status` detects and names that, and the remediation is a documented idempotent
-  snippet (README → _Repairing the auth hook grants_). A `repair` command is a separate
-  design question — what it may change, what it must refuse to change, and how it
-  proves it did no harm — and is not started in this branch.
+  snippet (README → _Repairing the auth hook grants_). The later `repair` command keeps
+  this exact grant boundary and adds catalog ownership/conflict checks.
 
 ## v0.4.1 — Hook activation — **Done**
 
@@ -118,8 +117,8 @@ Deliberately deferred from this branch, and the reason:
   `SADA_TEST_SUPABASE_*`; nothing in the test suite writes to a real Auth configuration.
 - **Editing `supabase/config.toml`.** Still documented rather than automated: local
   activation is a user-owned file, and hosted activation is what this branch covers.
-- **`uninstall`.** The correct removal order (disable remotely, then drop the database
-  objects) is documented and `hook disable` now makes the first half a single command.
+- **`uninstall` (delivered in v0.8).** This branch established the remote state machine;
+  the lifecycle branch composes it with strict and database cleanup.
 
 ## v0.5 — Strict trigger mode (opt-in) — **Done**
 
@@ -159,9 +158,8 @@ Deliberately deferred from this branch, and the reason:
 
 Deliberately deferred from this branch, and the reason:
 
-- **`uninstall`.** The full removal ordering — strict disable, hook disable, then drop the
-  objects — is documented, and `strict disable` makes the first step a single command. A
-  complete `uninstall` remains v0.8.
+- **`uninstall` (delivered in v0.8).** The full removal ordering composes this trigger
+  identity check with remote disable/verification and explicit database cleanup.
 - **A `--force` escape for trigger conflicts.** There is no safe default for "destroy the
   trigger somebody else created under this name", and offering one would make the
   dangerous path a flag away.
@@ -186,11 +184,21 @@ Deliberately deferred from this branch, and the reason:
 - Commands to add, remove and list allowlisted domains
 - Allowlist preserved across upgrades and blocklist refreshes
 
-## v0.8 — Uninstall and rollback safety
+## v0.8 — Repair, uninstall and rollback safety — **Done**
 
-- Complete removal of everything the tool installed
-- Preview of exactly what will be dropped before it happens
-- Safe behaviour on partial or interrupted installs
+- `repair` five-state assessment: healthy, repairable, manual action, conflict, absent
+- Surgical restoration of missing hook/strict leaf functions without migration replay
+- Fixed least-privilege Auth Hook grant repair; no automatic enforcement activation
+- Full `uninstall --dry-run` and confirmation-gated `uninstall --yes`
+- Explicit `--database-only` mode for local/deliberately separate teardown
+- Strict trigger removal, then hosted hook disable and verification, then database cleanup
+- Migration checksum, catalog definition, object owner, foreign-object and external
+  dependency verification before destruction
+- Explicit dependency-safe drops and plain empty-schema removal; no broad `CASCADE`
+- Transactional database cleanup and resumable cross-system partial failures
+- Stable exit codes `11` (repair conflict), `12` (uninstall conflict), and `13`
+  (confirmation required)
+- Mocked Management API and destructive scratch-PostgreSQL coverage; no hosted mutation
 
 ## v1.0 — npm release
 
